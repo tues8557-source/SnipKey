@@ -11,176 +11,172 @@ import SwiftUI
 @Observable
 class SnippetViewModel {
     var modelContext: ModelContext? = nil
-    
+
     func fetchSnippets() -> [SnippetItem]? {
         let fetchDescriptor = FetchDescriptor<SnippetItem>()
-        
+
         do {
-            let snippets = try modelContext?.fetch(fetchDescriptor)
-            
-            return snippets
-            
+            return try modelContext?.fetch(fetchDescriptor)
         } catch {
-            print("FAILED TO FETCH SNIPPETS")
+            print("FAILED TO FETCH SNIPPETS: \(error)")
             return []
         }
     }
-    
-    func setupInitialTags(){
+
+    func setupInitialTags() {
         let fetchDescriptor = FetchDescriptor<SnipTag>()
-        
+
         do {
             let tags = try modelContext?.fetch(fetchDescriptor)
-            
-            
-            let containsWorkTag = tags?.contains{ $0.name == "Work" } ?? false
-            let containsPersonalTag = tags?.contains{ $0.name == "Personal" } ?? false
-            let containsNoneTag = tags?.contains{ $0.name == "None" } ?? false
-            
-            if containsWorkTag && containsPersonalTag && containsNoneTag {
-                print("INITIAL TAGS ALREADY SETUP!")
-            } else {
-                print("NEED TO SETUP INITIAL TAGS!...")
-                self.setupTags()
+            let containsWorkTag = tags?.contains { $0.name == "Work" } ?? false
+            let containsPersonalTag = tags?.contains { $0.name == "Personal" } ?? false
+            let containsNoneTag = tags?.contains { $0.name == "None" } ?? false
+
+            if !(containsWorkTag && containsPersonalTag && containsNoneTag) {
+                setupTags()
             }
-            
         } catch {
-            print("FAILED TO SETUP INITIAL TAGS MODEL")
+            print("FAILED TO SETUP INITIAL TAGS MODEL: \(error)")
         }
     }
-    
+
     func setupTags() {
-        print("SETTING UP INITIAL TAGS...")
-        let newNoneTag = SnipTag(name: "None",imageTag: "tag.fill")
-        let newPersonalTag = SnipTag(name: "Personal",imageTag: "person.fill")
-        let newWorkTag = SnipTag(name: "Work",imageTag: "suitcase.fill")
-        self.modelContext?.insert(newPersonalTag)
-        self.modelContext?.insert(newWorkTag)
-        self.modelContext?.insert(newNoneTag)
-        print("INITIAL TAGS SETUP!")
+        let newNoneTag = SnipTag(name: "None", imageTag: "tag.fill")
+        let newPersonalTag = SnipTag(name: "Personal", imageTag: "person.fill")
+        let newWorkTag = SnipTag(name: "Work", imageTag: "suitcase.fill")
+        modelContext?.insert(newPersonalTag)
+        modelContext?.insert(newWorkTag)
+        modelContext?.insert(newNoneTag)
+        saveContext()
     }
-    
-    //    func createNewTagAndRelationship(tag: SnipTag, item: SnippetItem){
-    ////        self.modelContext?.insert(tag)
-    ////        item.customTag = tag
-    //    }
-    
-    // via List onDelete
-    func deleteItems(offsets: IndexSet, snippets:  [SnippetItem]) {
+
+    func deleteItems(offsets: IndexSet, snippets: [SnippetItem]) {
         withAnimation {
-              for index in offsets {
-                  self.modelContext?.delete(snippets[index])
-              }
-          }
-        try? self.modelContext?.save()
+            for index in offsets {
+                modelContext?.delete(snippets[index])
+            }
+        }
+        saveContext()
     }
-    
-    // single
+
     func deleteItem(snippet: SnippetItem) {
         withAnimation {
-            self.modelContext?.delete(snippet)
+            modelContext?.delete(snippet)
         }
-        try? self.modelContext?.save()
+        saveContext()
     }
-    
-    // multiple
+
     func deleteSelectedItems(snippets: [SnippetItem]) {
         withAnimation {
             for snippet in snippets {
-                self.modelContext?.delete(snippet)
+                modelContext?.delete(snippet)
             }
         }
-        try? self.modelContext?.save()
+        saveContext()
     }
-    
-    func deleteTag(offsets: IndexSet, tags:  [SnipTag]) {
+
+    func deleteTag(offsets: IndexSet, tags: [SnipTag]) {
         for index in offsets {
-            self.modelContext?.delete(tags[index])
+            modelContext?.delete(tags[index])
         }
+        saveContext()
     }
-    
+
     func createTag(name: String, iconName: String) -> SnipTag {
-        print("CREATING NEW TAG: \(name)")
-        let newTag = SnipTag(name: name,imageTag: iconName)
-        self.modelContext?.insert(newTag)
-        print("TAG CREATED: \(name)")
+        let newTag = SnipTag(name: name, imageTag: iconName)
+        modelContext?.insert(newTag)
+        saveContext()
         return newTag
-        
     }
-    
+
     func createData(type: FileType, data: Data, fileFormatType: String) -> SnippetFile {
-        print("CREATING NEW FILE-DOCUMENT: \(type)")
         let newFile = SnippetFile(type: type, formatType: fileFormatType, fileData: data)
-        newFile.fileData = data
-        self.modelContext?.insert(newFile)
-        print("FILE CREATED: \(type) with ID: \(newFile.id)")
+        modelContext?.insert(newFile)
+        saveContext()
         return newFile
-        
     }
-    
+
     func trackSnippetUsage(snippet: SnippetItem) {
-        print("Use snippet!")
-        
         snippet.lastTimeUsed = Date.now
         snippet.usedCount += 1
+        saveContext()
     }
-    
+
+    func toggleFavorite(snippet: SnippetItem) {
+        snippet.isFavorite.toggle()
+        snippet.updatedDate = Date.now
+        saveContext()
+    }
+
+    func updateSnippet(
+        _ snippet: SnippetItem,
+        title: String,
+        content: String,
+        type: SnipType? = nil
+    ) {
+        snippet.title = title
+        snippet.content = content
+        if let type {
+            snippet.type = type
+        }
+        snippet.updatedDate = Date.now
+        saveContext()
+    }
+
     func findTagCreated(tagName: String) -> SnipTag? {
         let fetchDescriptor = FetchDescriptor<SnipTag>()
-        
+
         do {
             let tags = try modelContext?.fetch(fetchDescriptor)
-            
-            
-            let tagFilteredByName = tags?.filter{ $0.name == tagName } ?? []
-            
-            if !tagFilteredByName.isEmpty {
-                return tagFilteredByName.first
-            } else {
-                return nil
-            }
-            
+            return tags?.first { $0.name == tagName }
         } catch {
-            print("FAILED TO SETUP INITIAL TAGS MODEL")
+            print("FAILED TO FIND TAG: \(error)")
             return nil
         }
     }
-    
+
     func findFileCreated(fileId: String) -> SnippetFile? {
         let fetchDescriptor = FetchDescriptor<SnippetFile>()
-        
+
         do {
             let snippetFiles = try modelContext?.fetch(fetchDescriptor)
-            
-            
-            let snippetFileFilteredById = snippetFiles?.filter{ $0.id == fileId } ?? []
-            
-            if !snippetFileFilteredById.isEmpty {
-                return snippetFileFilteredById.first
-            } else {
-                return nil
-            }
-            
+            return snippetFiles?.first { $0.id == fileId }
         } catch {
-            print("FAILED TO FIND FILE CREATED")
+            print("FAILED TO FIND FILE CREATED: \(error)")
             return nil
         }
     }
-    
-  
+
     func deleteFile(fileId: String) {
         if let snippetFile = findFileCreated(fileId: fileId) {
-            self.modelContext?.delete(snippetFile)
+            modelContext?.delete(snippetFile)
+            saveContext()
         }
     }
-    
-    func createSnippet(_ title: String, content: String, type: SnipType?, isSecure: Bool) -> SnippetItem {
-        print("ADD FUNC CALLED!")
-        let newItem = SnippetItem(title: title, content: content, type: type ?? .txt, isSecure: isSecure)
-        self.modelContext?.insert(newItem)
+
+    @discardableResult
+    func createSnippet(
+        _ title: String,
+        content: String,
+        type: SnipType?,
+        isSecure: Bool
+    ) -> SnippetItem {
+        let newItem = SnippetItem(
+            title: title,
+            content: content,
+            type: type ?? .txt,
+            isSecure: isSecure
+        )
+        modelContext?.insert(newItem)
+        saveContext()
         return newItem
-        
     }
 
+    private func saveContext() {
+        do {
+            try modelContext?.save()
+        } catch {
+            print("FAILED TO SAVE SNIPPET CONTEXT: \(error)")
+        }
+    }
 }
-
