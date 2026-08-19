@@ -8,249 +8,185 @@
 import AlertToast
 import SwiftData
 import SwiftUI
-import UniformTypeIdentifiers
-
-
-struct SnippetContentView: View {
-    let snippet: SnippetItem
-    
-    var body: some View {
-        if snippet.type == .txt {
-            ScrollView {
-                Text("\(snippet.content ?? "")".toDetectedAttributedString())
-                    .multilineTextAlignment(.leading)
-                    .padding(.top, 8)
-                    .tint(Color.label)
-            }.frame(height: 180)
-        }
-        
-        if snippet.type == .url {
-            Text("\(snippet.content ?? "")".toDetectedAttributedString())
-                .tint(Color.label)
-        }
-        
-        if snippet.type == .image && snippet.file?.fileData != nil {
-            if let uiImage = UIImage(data: (snippet.file?.fileData)!) {
-                Image(uiImage: uiImage)
-                    .resizable()
-                    .scaledToFit()
-                Text("\(snippet.file?.fileFormatType ?? "")")
-            }
-        }
-    }
-}
 
 struct SnippetViewDetail: View {
-    let deviceBiometrics: DeviceBiometrics = DeviceBiometrics()
-    
+    @Environment(\.modelContext) private var modelContext
+
+    private let deviceBiometrics = DeviceBiometrics()
+
+    @State private var snippet: SnippetItem
+    @State private var isUnlocked: Bool
+    @State private var isEditFormVisible = false
     @State private var showToast = false
     @State private var toastText = "Copied!"
-    @State var isEditFormVisible: Bool = false
-    @State private var snippet: SnippetItem = SnippetItem(
-        title: "", content: "", type: SnipType.url, isSecure: false)
-    @State private var showSecureAccessPrompt = false
-    
-    
+
+    init(item: SnippetItem) {
+        _snippet = State(initialValue: item)
+        _isUnlocked = State(initialValue: !item.isSecure)
+    }
+
     var body: some View {
         Group {
-            if showSecureAccessPrompt {
-                Section(header: Image(systemName: "lock")
-                    .resizable()
-                    .frame(width:88, height: 120), footer: Button{
-                    toggleVisibility()
-                } label: {
-                    Text("Require Access")
-                        .underline()
-                }) {
-                    
-                    Text("Snippet is locked")
-                }
-                .padding()
-                .listRowBackground(Color.tertiarySystemBackground)
+            if snippet.isSecure && !isUnlocked {
+                lockedView
             } else {
-                Form {
-                    // Compact header: title (1–2 lines) + a small type pill. Kept tight so the
-                    // content section below gets the majority of the screen (App Store feedback).
-                    Section {
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text(snippet.title ?? "")
-                                .font(.custom("IBMPlexMono-SemiBold", size: 17))
-                                .lineLimit(2)
-                                .truncationMode(.tail)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-
-                            HStack(spacing: 6) {
-                                Image(systemName: (snippet.type ?? SnipType.txt).snipTypeImage)
-                                    .font(.system(size: 11))
-                                Text((snippet.type ?? SnipType.txt).displayText)
-                                    .font(.custom("IBMPlexMono-Medium", size: 12))
-                            }
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 4)
-                            .background(Color.secondarySystemBackground, in: Capsule())
-                            .foregroundStyle(.secondary)
-                        }
-                        .padding(.vertical, 2)
-                    }
-                    .listRowBackground(Color.tertiarySystemBackground)
-
-                    Section(
-                        header: HStack {
-                            Group{
-                                Text("Content")
-                                if snippet.type == .url {
-                                    Spacer()
-                                    Button(action: openURLContent) {
-                                        Label("Open URL", systemImage: "arrow.up.forward.app.fill")
-                                            .tint(.label)
-                                            .bold()
-                                            .font(.custom("IBMPlexMono-Medium", size: 14))
-                                            .underline()
-                                            .tint(Color.label)
-                                    }
-                                }
-                               
-                            }
-                        },
-                        footer: HStack {
-                            Group{
-                                Label("\(snippet.customTag?.name ?? "None")", systemImage: "tag.fill")
-                                    .tint(.label)
-                                Spacer()
-                                Button(action: copyToClipboard) {
-                                    Text("Copy")
-                                        .bold()
-                                        .font(.custom("IBMPlexMono-Medium", size: 16))
-                                        .underline()
-                                        .tint(Color.label)
-                                }
-                            }
-                        }
-                    ) {
-                        SnippetContentViewDisplay(snippet: snippet)
-                    }
-                    .listRowBackground(Color.tertiarySystemBackground)
-                    
-                    Section(header: Text("Security Access")) {
-                        HStack(spacing: 16) {
-                            ZStack {
-                                Circle()
-                                    .fill(snippet.isSecure ? Color.blue.opacity(0.2) : Color.gray.opacity(0.2))
-                                    .frame(width: 44, height: 44)
-                                
-                                Image(systemName: snippet.isSecure ? "lock.shield.fill" : "lock.open")
-                                    .font(.title3)
-                                    .foregroundStyle(snippet.isSecure ? .blue : .secondary)
-                            }
-                            
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(snippet.isSecure ? "Protected" : "Standard")
-                                    .font(.body)
-                                    .fontWeight(.medium)
-                                
-                                Text(snippet.isSecure
-                                     ? "Requires Face ID or passcode to use"
-                                     : "Can be used without authentication")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
-                            
-                            Spacer()
-                        }
-                        .padding(.vertical, 4)
-                    }
-                    .listRowBackground(Color.tertiarySystemBackground)
-                    
-                    Section(
-                        footer: Group {
-                                Text("Enable full keyboard access to track usage count for this snippet.")
-                                    .foregroundColor(.secondary)
-                                    .font(.custom("IBMPlexMono-Regular", size: 12))
-                            }
-                    ){
-                        Text("Used Count: \(snippet.usedCount)")
-                    }
-                        
-                   
-                }
-                .toolbar {
-                    ToolbarItem(placement: .topBarTrailing) {
-                        Button(action: toggleEditForm) {
-                            Text("Edit")
-                                .bold()
-                                .font(.custom("IBMPlexMono-Medium", size: 15))
-                                .underline()
-                                .tint(Color.label)
-                        }.sheet(isPresented: $isEditFormVisible) {
-                            NavigationStack {
-                                SnippetForm(snippet: snippet, isFormVisible: $isEditFormVisible)
-                            }
-                            .presentationBackground(Color.clear)
-                            
-                        }
-                    }
-                    
-                    ToolbarItem(placement: .title){
-                        if snippet.updatedDate != nil {
-                            Text("**Updated:** \(snippet.updatedDate?.formatted(date: .abbreviated, time: .omitted) ?? Date.now.formatted(date: .abbreviated, time: .omitted))")
-                                .font(.custom("IBMPlexMono-Medium", size: 12))
-                        } else {
-                            Text("**Created:** \(snippet.creationDate?.formatted(date: .abbreviated, time: .omitted) ?? Date.now.formatted(date: .abbreviated, time: .omitted))")
-                                .font(.custom("IBMPlexMono-Medium", size: 12))
-                        }
-
-
-                    }
-                }
-                // Trim the grouped-form top inset so the compact title starts higher and the
-                // content section is visible sooner (App Store feedback on wasted top space).
-                .contentMargins(.top, 8, for: .scrollContent)
+                snippetForm
             }
         }
-        .font(.custom("IBMPlexMono-Medium", size: 15))
-        .tint(Color.label)
+        .navigationTitle(snippet.title ?? "Snippet")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                Button(action: toggleFavorite) {
+                    Image(systemName: snippet.isFavorite ? "star.fill" : "star")
+                        .foregroundStyle(snippet.isFavorite ? Color.yellow : Color.primary)
+                }
+                .accessibilityLabel(snippet.isFavorite ? "Remove from Favorites" : "Add to Favorites")
+
+                Button("Edit") {
+                    isEditFormVisible = true
+                }
+                .fontWeight(.semibold)
+            }
+        }
+        .sheet(isPresented: $isEditFormVisible) {
+            NavigationStack {
+                SnippetForm(snippet: snippet, isFormVisible: $isEditFormVisible)
+            }
+            .presentationBackground(Color.clear)
+        }
         .toast(isPresenting: $showToast) {
             AlertToast(
-                displayMode: .banner(.pop), type: .systemImage("doc.on.clipboard", .label),
+                displayMode: .banner(.pop),
+                type: .systemImage("doc.on.clipboard", .label),
                 title: toastText,
                 style: .style(
                     backgroundColor: Color.tertiarySystemBackground,
-                    titleFont: .custom("IBMPlexMono-Medium", size: 14)))
+                    titleFont: .custom("IBMPlexMono-Medium", size: 14)
+                )
+            )
         }
     }
-    
-    init(item: SnippetItem) {
-        _snippet = State(initialValue: item)
-        _showSecureAccessPrompt = State(initialValue: item.isSecure)
-    }
-    
-    func openURLContent() {
-        if !snippet.content!.isEmpty  && snippet.content!.isValidURL(){
-            UIApplication.shared.open(URL(string: snippet.content!.getValidURLString())!)
+
+    private var lockedView: some View {
+        ContentUnavailableView {
+            Label("Snippet Locked", systemImage: "lock.fill")
+        } description: {
+            Text("Authenticate to view or edit this snippet.")
+        } actions: {
+            Button("Unlock") {
+                unlockSnippet()
+            }
+            .buttonStyle(.borderedProminent)
         }
     }
-    
-    func toggleVisibility(){
-        deviceBiometrics.authenticate(successHandler: {
-            showSecureAccessPrompt = false
-        }, unSuccessHandler: { _ in
-            showSecureAccessPrompt = true
-        })
+
+    private var snippetForm: some View {
+        Form {
+            Section {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(alignment: .firstTextBaseline) {
+                        Text(snippet.title ?? "")
+                            .font(.headline)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+
+                        if snippet.isFavorite {
+                            Label("Favorite", systemImage: "star.fill")
+                                .labelStyle(.iconOnly)
+                                .foregroundStyle(Color.yellow)
+                        }
+                    }
+
+                    HStack(spacing: 6) {
+                        Image(systemName: (snippet.type ?? .txt).snipTypeImage)
+                        Text((snippet.type ?? .txt).displayText)
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+            }
+
+            Section("Content") {
+                SnippetContentViewDisplay(snippet: snippet)
+
+                HStack {
+                    if snippet.type == .url {
+                        Button {
+                            openURLContent()
+                        } label: {
+                            Label("Open URL", systemImage: "arrow.up.forward.app")
+                        }
+                    }
+
+                    Spacer()
+
+                    Button {
+                        copyToClipboard()
+                    } label: {
+                        Label("Copy", systemImage: "doc.on.doc")
+                    }
+                }
+            }
+
+            Section("Details") {
+                if let tagName = snippet.customTag?.name, !tagName.isEmpty {
+                    LabeledContent("Tag", value: tagName)
+                }
+
+                LabeledContent("Used", value: "\(snippet.usedCount) times")
+
+                if let updatedDate = snippet.updatedDate {
+                    LabeledContent("Updated", value: updatedDate.formatted(date: .abbreviated, time: .shortened))
+                } else if let creationDate = snippet.creationDate {
+                    LabeledContent("Created", value: creationDate.formatted(date: .abbreviated, time: .shortened))
+                }
+
+                if snippet.isSecure {
+                    Label("Protected with device authentication", systemImage: "lock.shield.fill")
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
     }
-    
-    func toggleEditForm() {
-        self.isEditFormVisible.toggle()
+
+    private func toggleFavorite() {
+        snippet.isFavorite.toggle()
+        snippet.updatedDate = Date.now
+        try? modelContext.save()
     }
-    
-    func copyToClipboard() {
+
+    private func unlockSnippet() {
+        deviceBiometrics.authenticate(
+            successHandler: {
+                isUnlocked = true
+            },
+            unSuccessHandler: { _ in
+                isUnlocked = false
+            }
+        )
+    }
+
+    private func openURLContent() {
+        guard
+            let content = snippet.content,
+            !content.isEmpty,
+            content.isValidURL(),
+            let url = URL(string: content.getValidURLString())
+        else { return }
+
+        UIApplication.shared.open(url)
+    }
+
+    private func copyToClipboard() {
         let result: SnippetCopyResult
+
         switch snippet.type {
         case .file, .image:
             result = SnippetPasteboard.copyFile(
                 data: snippet.file?.fileData,
                 mimeType: snippet.file?.fileFormatType,
-                hasFullAccess: true)
+                hasFullAccess: true
+            )
         default:
             result = SnippetPasteboard.copyText(snippet.content ?? "", hasFullAccess: true)
         }
@@ -261,16 +197,19 @@ struct SnippetViewDetail: View {
         case .missingData:
             toastText = "File data missing."
         case .tooLarge:
-            toastText = "File is over \(SnippetPasteboard.maxFileSizeDescription) — too large to copy."
+            toastText = "File is over \(SnippetPasteboard.maxFileSizeDescription)."
         case .unsupportedType:
             toastText = "Unsupported file type."
         case .noFullAccess:
             toastText = "Copy failed."
         }
+
         showToast = true
     }
 }
 
 #Preview {
-    SnippetViewDetail(item: .dummy)
+    NavigationStack {
+        SnippetViewDetail(item: .dummy2)
+    }
 }
