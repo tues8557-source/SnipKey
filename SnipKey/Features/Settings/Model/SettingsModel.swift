@@ -149,11 +149,12 @@ final class SettingsModel {
 
 // MARK: - App Group Settings Bridge
 
-/// Synchronous read/write of experimental settings via shared App Group UserDefaults.
+/// Synchronous read/write of experimental settings.
 /// The keyboard extension needs synchronous reads at launch (SwiftData fetch is async).
 /// The main app's SettingsViewModel mirrors writes here every time the SwiftData settings change.
+/// Personal Team builds have no App Group entitlement, so these settings become target-local.
 enum AppGroupSettings {
-    static let suite = "group.snipkey"
+    static let suite = "group.com.tues8557.clipboardkeyboard"
 
     enum Key {
         static let useNativeKeyboardV2 = "useNativeKeyboardV2"
@@ -181,19 +182,26 @@ enum AppGroupSettings {
     }
 
     static func bool(forKey key: String, default defaultValue: Bool = false) -> Bool {
-        UserDefaults(suiteName: suite)?.object(forKey: key) as? Bool ?? defaultValue
+        defaults.object(forKey: key) as? Bool ?? defaultValue
     }
 
     static func setBool(_ value: Bool, forKey key: String) {
-        UserDefaults(suiteName: suite)?.set(value, forKey: key)
+        defaults.set(value, forKey: key)
     }
 
     static func string(forKey key: String, default defaultValue: String) -> String {
-        UserDefaults(suiteName: suite)?.string(forKey: key) ?? defaultValue
+        defaults.string(forKey: key) ?? defaultValue
     }
 
     static func setString(_ value: String, forKey key: String) {
-        UserDefaults(suiteName: suite)?.set(value, forKey: key)
+        defaults.set(value, forKey: key)
+    }
+
+    private static var defaults: UserDefaults {
+        guard FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: suite) != nil else {
+            return .standard
+        }
+        return UserDefaults(suiteName: suite) ?? .standard
     }
 }
 

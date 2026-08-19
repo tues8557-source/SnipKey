@@ -1,89 +1,92 @@
-# Personal fork setup
+# Personal Team test setup
 
-This branch turns SnipKey into a clipboard-first keyboard for iPhone and iPad. The source code is ready to use, but Apple signing identifiers from the upstream project must be replaced with identifiers owned by your Apple Developer account before installing on a device.
+This branch is the device-test variant of the clipboard-first SnipKey fork. It keeps the shared App Group store used by the app and keyboard, but disables CloudKit so the first on-device test does not depend on iCloud provisioning.
 
-## 1. Clone this fork and switch to the development branch
+## 1. Update your local checkout
+
+If you already cloned the repository:
 
 ```bash
-git clone https://github.com/tues8557-source/SnipKey.git
 cd SnipKey
-git switch dev/clipboard-keyboard
+git fetch origin
+git switch dev/personal-team-test
+git pull
 ```
 
-## 2. Find your Apple Developer Team ID
+If Xcode has modified `SnipKey.xcodeproj/project.pbxproj` because you selected your Personal Team, keep that change. The setup script below deliberately preserves your current Team selection.
 
-Open Xcode → Settings → Accounts → select your Apple Account and team. Use the Team ID shown there (or the Team ID shown in your Apple Developer membership details).
+## 2. Configure unique identifiers
 
-## 3. Configure the fork identifiers
-
-Choose a unique reverse-DNS bundle identifier. Example:
+Run:
 
 ```bash
-python3 configure_fork.py \
-  --team-id ABCDE12345 \
-  --bundle-id com.example.clipboardkeyboard
+python3 configure_fork.py --bundle-id com.tues8557.clipboardkeyboard
 ```
 
-The script updates all of these together so the app and keyboard continue to share one SwiftData store:
+You do **not** need to know your Team ID for this branch. The script changes the identifiers while preserving whichever Team you selected in Xcode.
 
-- App bundle ID: `com.example.clipboardkeyboard`
-- Keyboard bundle ID: `com.example.clipboardkeyboard.keyboard`
-- App Group: `group.com.example.clipboardkeyboard`
-- iCloud container: `iCloud.com.example.clipboardkeyboard`
-- Xcode Team ID
+It configures:
 
-Do not give the app and keyboard different App Group or iCloud container identifiers.
+- App bundle ID: `com.tues8557.clipboardkeyboard`
+- Keyboard bundle ID: `com.tues8557.clipboardkeyboard.keyboard`
+- App Group: `group.com.tues8557.clipboardkeyboard`
+- CloudKit: disabled for this test branch
 
-## 4. Verify Signing & Capabilities in Xcode
+If that bundle ID is unexpectedly unavailable, rerun the script with a more unique value, for example:
+
+```bash
+python3 configure_fork.py --bundle-id com.tues8557.jaeho.clipboardkeyboard
+```
+
+## 3. Xcode signing
 
 Open `SnipKey.xcodeproj`.
 
-For the **SnipKey** target:
+For **both** targets on the left — `SnipKey` and `SnipKeyboard`:
 
-- Signing & Capabilities → Team: your team
-- Automatically manage signing: on
-- App Groups: the `group.<bundle-id>` generated above
-- iCloud: the `iCloud.<bundle-id>` generated above
-- iCloud service: CloudKit
+1. Open **Signing & Capabilities**.
+2. Enable **Automatically manage signing**.
+3. Select your `Personal Team` in **Team**.
+4. Confirm the bundle IDs match the values printed by the setup script.
+5. Confirm both targets use the same App Group (`group.<bundle-id>`).
 
-For the **SnipKeyboard** target, select the same Team and the same App Group and iCloud container.
+The local test branch intentionally has no iCloud/CloudKit entitlement. The upstream In-App Purchase/CloudKit functionality is not required for the clipboard keyboard test.
 
-If Xcode offers to register the App Group or iCloud container, allow it. The identifiers must belong to your developer team; the upstream identifiers cannot be reused by another team.
+## 4. Build on a physical iPhone or iPad
 
-## 5. Install on iPhone or iPad
+Connect the device to the Mac, select it as the Xcode run destination, select the **SnipKey** scheme, then press Run.
 
-Select your physical device in Xcode and run the **SnipKey** app target.
+After installation, enable the keyboard on the device:
 
-Then on the device open:
+**Settings → General → Keyboard → Keyboards → Add New Keyboard**
 
-Settings → General → Keyboard → Keyboards → Add New Keyboard
+Choose the SnipKey/Shortcuts keyboard. Enable **Allow Full Access** for this personal build so the extension can access the shared App Group store and respond to the explicit **Save Clipboard** action.
 
-Select the SnipKey/Shortcuts keyboard extension and enable **Allow Full Access**. Full Access is needed for the extension to use the shared App Group data and for the user-initiated **Save Clipboard** button.
+## 5. What to test
 
-## 6. Use the keyboard
+In the main app:
 
-The custom keyboard is intentionally not a Korean or English typing engine. Keep Apple's normal keyboard for typing and switch with the globe key only when you want clipboard snippets.
+- create a text snippet
+- edit its title/content
+- favorite/unfavorite it
 
-The keyboard provides:
+Then switch to the custom keyboard in Notes or another normal text field and verify:
 
-- Recent snippets
-- Favorites filter
-- Save current text clipboard
-- Exact duplicate detection
-- Tap a snippet to insert it into the current text field
-- Favorite/unfavorite directly from the keyboard
-- Cursor left/right
-- Space, delete and return
-- Globe key to switch back to another keyboard
+- the saved snippet appears
+- tapping it inserts its text
+- favorites filter works
+- **Save Clipboard** stores copied text
+- duplicate clipboard text is not added twice
+- globe, left/right cursor, space, delete, and return work
 
-Secure, image and file snippets remain manageable in the main app but are intentionally excluded from the quick-insert keyboard.
+Because CloudKit is disabled on this branch, this stage validates **one-device app ↔ keyboard sharing only**. iPhone ↔ iPad iCloud synchronization will be re-enabled on the paid/iCloud branch after the local keyboard behavior is confirmed.
 
-## 7. iCloud behavior
+## 6. Moving back to the iCloud build later
 
-The app uses one SwiftData store backed by the shared App Group and CloudKit. Install the same build on an iPhone and iPad signed into the same iCloud account and the saved snippet library should synchronize through the private CloudKit database.
+The original clipboard development branch remains available as:
 
-CloudKit synchronization is asynchronous, so changes can take a short time to appear on another device. The main app remains the place to edit titles/content and search the complete library.
+```bash
+git switch dev/clipboard-keyboard
+```
 
-## Development note
-
-The upstream QWERTY implementation is still present in the repository for reference and easy rollback, but the keyboard extension controller on this branch no longer loads it. This keeps the personal fork much smaller at runtime without making the upstream code difficult to recover.
+That branch retains the CloudKit architecture. Do not merge `dev/personal-team-test` over it until device testing is complete; keeping the branches separate makes the Personal Team workaround easy to discard later.

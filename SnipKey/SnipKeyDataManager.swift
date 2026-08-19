@@ -8,7 +8,14 @@
 import Foundation
 import SwiftData
 
-class SnipKeyDataManager {
+/// SwiftData configuration used by both the containing app and the keyboard extension.
+///
+/// Personal Team test builds do not include the App Groups capability, so each
+/// target falls back to its own local store. If the App Group is restored on a
+/// production branch, the same code automatically uses the shared store again.
+final class SnipKeyDataManager {
+    static let appGroupIdentifier = "group.com.tues8557.clipboardkeyboard"
+
     var sharedContainer: ModelContainer? = nil
 
     func makeSharedContainer() -> ModelContainer {
@@ -17,12 +24,12 @@ class SnipKeyDataManager {
                 SnippetItem.self,
                 SettingsModel.self,
             ])
-            let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false, groupContainer: .identifier("group.snipkey"), cloudKitDatabase: .automatic)
+            let modelConfiguration = Self.makeConfiguration(for: schema)
 
             do {
                 return try ModelContainer(for: schema, configurations: [modelConfiguration])
             } catch {
-                fatalError("Could not create ModelContainer: \(error)")
+                fatalError("Could not create local ModelContainer: \(error)")
             }
         }()
 
@@ -31,23 +38,33 @@ class SnipKeyDataManager {
         return sharedModelContainer
     }
 
-    /// Build the shared `ModelContainer` off the main thread.
-    /// Opening the SQLite store + CloudKit registration is 50–200ms of synchronous work;
-    /// performing it here lets `viewDidLoad` complete and the keyboard frame appear before
-    /// SwiftData is ready. Callers await this once, then inject the container into SwiftUI.
+    /// Build the shared `ModelContainer` off the main thread. This keeps the
+    /// keyboard extension responsive while the local SQLite store is opened.
     static func makeSharedContainerAsync() async throws -> ModelContainer {
         try await Task.detached(priority: .userInitiated) {
             let schema = Schema([
                 SnippetItem.self,
                 SettingsModel.self,
             ])
-            let modelConfiguration = ModelConfiguration(
-                schema: schema,
-                isStoredInMemoryOnly: false,
-                groupContainer: .identifier("group.snipkey"),
-                cloudKitDatabase: .automatic
-            )
+            let modelConfiguration = Self.makeConfiguration(for: schema)
             return try ModelContainer(for: schema, configurations: [modelConfiguration])
         }.value
+    }
+
+    private static func makeConfiguration(for schema: Schema) -> ModelConfiguration {
+        if FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupIdentifier) != nil {
+            return ModelConfiguration(
+                schema: schema,
+                isStoredInMemoryOnly: false,
+                groupContainer: .identifier(appGroupIdentifier),
+                cloudKitDatabase: .none
+            )
+        }
+
+        return ModelConfiguration(
+            schema: schema,
+            isStoredInMemoryOnly: false,
+            cloudKitDatabase: .none
+        )
     }
 }
