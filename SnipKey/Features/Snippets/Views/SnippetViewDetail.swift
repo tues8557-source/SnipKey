@@ -39,7 +39,7 @@ struct SnippetViewDetail: View {
             ToolbarItemGroup(placement: .topBarTrailing) {
                 Button(action: toggleFavorite) {
                     Image(systemName: snippet.isFavorite ? "star.fill" : "star")
-                        .foregroundStyle(snippet.isFavorite ? .yellow : .primary)
+                        .foregroundStyle(snippet.isFavorite ? Color.yellow : Color.primary)
                 }
                 .accessibilityLabel(snippet.isFavorite ? "Remove from Favorites" : "Add to Favorites")
 
@@ -93,7 +93,7 @@ struct SnippetViewDetail: View {
                         if snippet.isFavorite {
                             Label("Favorite", systemImage: "star.fill")
                                 .labelStyle(.iconOnly)
-                                .foregroundStyle(.yellow)
+                                .foregroundStyle(Color.yellow)
                         }
                     }
 
