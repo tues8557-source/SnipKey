@@ -2,994 +2,323 @@
 //  KeyboardView.swift
 //  SnipKeyboard
 //
-//  Created by Jonathan Taveras Vargas on 3/31/24.
+//  Clipboard-first keyboard surface for the personal SnipKey fork.
 //
 
 import SwiftData
 import SwiftUI
-import AlertToast
-import UniformTypeIdentifiers
-
-// MARK: - Sort Option
-
-enum SortOption: String, CaseIterable {
-    case alphabetical = "Alphabetical"
-    case dateCreated = "Date Created"
-    case recentlyUsed = "Recently Used"
-
-    var imageName: String {
-        switch self {
-        case .dateCreated:   return "calendar.circle"
-        case .recentlyUsed:  return "timer.circle"
-        case .alphabetical:  return "textformat.abc"
-        }
-    }
-}
-
-// MARK: - Snippet Press Style
-
-/// Lightweight press feedback for snippet cells — subtle scale + opacity, no haptic.
-/// Local to the keyboard target (the app's `PressableButtonStyle` lives in a file
-/// that isn't compiled into SnipKeyboard, and allocates a generator per press).
-struct SnippetPressStyle: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .scaleEffect(configuration.isPressed ? 0.97 : 1.0)
-            .opacity(configuration.isPressed ? 0.85 : 1.0)
-            .animation(.spring(response: 0.18, dampingFraction: 0.8), value: configuration.isPressed)
-    }
-}
-
-// MARK: - Keyboard Snippet View
+import UIKit
 
 struct KeyboardView: View {
-    @Environment(\.modelContext) var modelContext
-    @Environment(\.keyboardActions) private var keyboardActions
-    @Environment(SettingsViewModel.self) private var settingsViewModel
-    @Environment(QWERTYKeyboardState.self) private var qwertyStateFromEnvironment: QWERTYKeyboardState?
-
+    @Environment(\.modelContext) private var modelContext
     @Query(sort: \SnippetItem.creationDate, order: .reverse) private var snippets: [SnippetItem]
-    @Query(sort: \SnipTag.name) private var tags: [SnipTag]
-    @Query() private var settings: [SettingsModel]
 
-    let deviceBiometrics = DeviceBiometrics()
+    var insertText: (String) -> Void = { _ in }
+    var advanceToNextInputMode: () -> Void = {}
+    var deleteBackward: () -> Void = {}
+    var moveCursor: (Int) -> Void = { _ in }
+    var insertReturn: () -> Void = {}
 
-    // Snippet interaction state
-    @State private var isUnlocked: Bool = false
-    @State private var showCreateSnippetCTA = false
-    @State private var showCreatedToast = false
-    @State private var showCopiedToast = false
-    @State private var copyToastText = ""
-    @State private var selectedText: String = ""
-    @State var snippetViewModel = SnippetViewModel()
+    @State private var favoritesOnly = false
+    @State private var statusMessage: String?
 
-    // Long-press preview
-    @State private var previewedSnippet: SnippetItem?
-    // SwiftUI fires the Button action on touch-up even after a simultaneous
-    // long press succeeded — this flag eats that one spurious tap.
-    @State private var suppressNextTap = false
-
-    // Tag filter
-    @State private var selectedFilter: SnipTag? = nil
-
-    // Sort
-    @State private var sortOption: SortOption = .recentlyUsed
-    @State private var sortOrder: SortOrder = .forward
-
-    // Memoized, ready-to-render list — recomputed only when its inputs change,
-    // not on every body pass. `hasSeeded` keeps the first population un-animated
-    // so cells don't all animate in when the keyboard first opens.
-    @State private var displayedSnippets: [SnippetItem] = []
-    @State private var hasSeeded = false
-
-    // Delete long-press
-    @State private var isLongPressing = false
-    @State private var deleteTimer: Timer?
-
-    // Notification observers
-    @State private var notificationObservers: [Any] = []
-
-    // MARK: - Computed Properties
-
-    private var currentKeyboardSettings: SettingsModel {
-        settings.first ?? SettingsModel(afterPasteAction: .space)
-    }
-
-    /// Same light/dark signal the V2 keys use, so the snippet list matches them
-    /// (driven by the keyboard's `appearanceMode`, not the system color scheme).
-    private var isDark: Bool {
-        qwertyStateFromEnvironment?.appearanceMode == .dark
-    }
-
-    /// Filter + sort the snippets once and store the result in `displayedSnippets`.
-    /// Called only from `.onChange` of its inputs (and a one-time seed), so the
-    /// O(n log n) work no longer runs on every unrelated body re-evaluation.
-    private func recomputeDisplayed(animation: Animation? = nil) {
-        let filtered: [SnippetItem]
-        if let filter = selectedFilter {
-            filtered = snippets.filter { $0.customTag == filter }
-        } else {
-            filtered = Array(snippets)
-        }
-
-        let sorted: [SnippetItem]
-        switch sortOption {
-        case .dateCreated:
-            sorted = filtered.sorted { first, second in
-                let d1 = first.creationDate ?? .distantPast
-                let d2 = second.creationDate ?? .distantPast
-                return sortOrder == .forward ? d1 > d2 : d1 < d2
+    private var visibleSnippets: [SnippetItem] {
+        snippets
+            .filter { snippet in
+                guard !snippet.isSecure else { return false }
+                guard snippet.type == .txt || snippet.type == .url else { return false }
+                guard let content = snippet.content else { return false }
+                guard !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+                return !favoritesOnly || snippet.isFavorite
             }
-        case .recentlyUsed:
-            sorted = filtered.sorted { first, second in
-                let d1 = first.lastTimeUsed ?? .distantPast
-                let d2 = second.lastTimeUsed ?? .distantPast
-                return sortOrder == .forward ? d1 > d2 : d1 < d2
+            .sorted { lhs, rhs in
+                if lhs.isFavorite != rhs.isFavorite {
+                    return lhs.isFavorite && !rhs.isFavorite
+                }
+
+                let lhsDate = lhs.lastTimeUsed ?? lhs.updatedDate ?? lhs.creationDate ?? .distantPast
+                let rhsDate = rhs.lastTimeUsed ?? rhs.updatedDate ?? rhs.creationDate ?? .distantPast
+                return lhsDate > rhsDate
             }
-        case .alphabetical:
-            // Precompute lowercased titles once (O(n)) instead of inside the
-            // comparator (O(n log n) string allocations).
-            sorted = filtered
-                .map { (item: $0, key: $0.title?.lowercased() ?? "") }
-                .sorted { sortOrder == .forward ? $0.key < $1.key : $0.key > $1.key }
-                .map(\.item)
-        }
-
-        // Animate only when the visible order actually changes — e.g. tapping the
-        // already-top recently-used cell would otherwise fire a no-op animated
-        // assignment (implicit-transition flicker).
-        if let animation, hasSeeded, sorted.map(\.id) != displayedSnippets.map(\.id) {
-            withAnimation(animation) { displayedSnippets = sorted }
-        } else {
-            displayedSnippets = sorted
-        }
-        hasSeeded = true
     }
-
-    // MARK: - Grid Layout
-
-    private let gridColumns = [
-        GridItem(.adaptive(minimum: 150, maximum: 200), spacing: 8)
-    ]
-
-    // MARK: - Body
 
     var body: some View {
         VStack(spacing: 0) {
-            // Top toolbar
-            ToolbarView()
+            topBar
+            Divider()
 
-            // Scrollable snippet grid
-            ScrollView {
-                // Create snippet CTA (when text is selected)
-                CreateSnippetCTA()
-
-                if displayedSnippets.isEmpty {
-                    EmptyStateView()
-                        .transition(.opacity)
-                } else {
-                    LazyVGrid(columns: gridColumns, spacing: 8) {
-                        ForEach(displayedSnippets, id: \.self.id) { snippet in
-                            Button {
-                                if suppressNextTap {
-                                    suppressNextTap = false
-                                    return
-                                }
-                                sentValue(snippet: snippet)
-                            } label: {
-                                SnippetListItemMinimal(item: snippet, isDark: isDark)
-                            }
-                            .buttonStyle(SnippetPressStyle())
-                            // simultaneousGesture (not highPriority) keeps ScrollView
-                            // panning intact; the default 10pt maximumDistance cancels
-                            // the press once a scroll drag starts. Same combo as the
-                            // delete key below.
-                            .simultaneousGesture(
-                                LongPressGesture(minimumDuration: 0.4)
-                                    .onEnded { _ in
-                                        suppressNextTap = true
-                                        presentPreview(for: snippet)
-                                    }
-                            )
+            if visibleSnippets.isEmpty {
+                emptyState
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 7) {
+                        ForEach(visibleSnippets, id: \.persistentModelID) { snippet in
+                            snippetRow(snippet)
                         }
                     }
-                    .padding(.horizontal, 12)
-                    .padding(.top, 2)
-                    .padding(.bottom, 8)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 8)
                 }
+                .scrollIndicators(.hidden)
             }
-            .scrollIndicators(.hidden)
 
-            // Bottom bar: filter + actions
-            BottomBar()
+            Divider()
+            editingBar
         }
-        .frame(height: KeyboardDimensions.totalHeight(forScreenWidth: UIScreen.main.bounds.width))
-        .overlay {
-            if let snippet = previewedSnippet {
-                SnippetPreviewOverlay(
-                    snippet: snippet,
-                    isDark: isDark,
-                    canCopy: keyboardActions.hasFullAccess(),
-                    onCopy: { copySnippetToClipboard(snippet) },
-                    onInsert: {
-                        previewedSnippet = nil
-                        snippetViewModel.trackSnippetUsage(snippet: snippet)
-                        if sortOption == .recentlyUsed {
-                            recomputeDisplayed(animation: .spring(response: 0.35, dampingFraction: 0.85))
-                        }
-                        KeyboardHaptics.keyPress()
-                        // Secure snippets were already authenticated to open the
-                        // preview — go straight to insertion, not through sentValue.
-                        sentValueToKeyboard(snippet: snippet)
-                    },
-                    onDismiss: {
-                        suppressNextTap = false
-                        withAnimation(.easeIn(duration: 0.12)) { previewedSnippet = nil }
-                    }
-                )
-                .transition(.opacity.combined(with: .scale(scale: 0.96)))
-            }
-        }
-        .onAppear {
-            settingsViewModel.modelContext = modelContext
-            snippetViewModel.modelContext = modelContext
-            setupNotificationObservers()
-            KeyboardHaptics.prepare()
-            // Initial population — un-animated (hasSeeded == false) for an instant,
-            // jitter-free first paint.
-            recomputeDisplayed()
-        }
-        .onChange(of: snippets) {
-            // Fires on inserts/deletes (usage-only attribute bumps are handled in
-            // sentValue, since @Query compares elements by persistent ID).
-            recomputeDisplayed(animation: .easeInOut(duration: 0.2))
-        }
-        .onChange(of: sortOption) {
-            recomputeDisplayed(animation: .easeInOut(duration: 0.2))
-        }
-        .onChange(of: sortOrder) {
-            recomputeDisplayed(animation: .easeInOut(duration: 0.2))
-        }
-        .onChange(of: selectedFilter) {
-            recomputeDisplayed(animation: .easeInOut(duration: 0.2))
-        }
-        .onDisappear {
-            removeNotificationObservers()
-            stopRapidDeletion()
-        }
-        .toast(isPresenting: $showCreatedToast) {
-            AlertToast(
-                displayMode: .banner(.pop),
-                type: .systemImage("checkmark.circle.fill", .green),
-                title: "New Snippet created!",
-                style: .style(
-                    backgroundColor: KeyStyle.solidSurface(isDark: isDark),
-                    titleColor: KeyStyle.solidSurfaceText(isDark: isDark),
-                    titleFont: .custom("IBMPlexMono-Medium", size: 14)
-                )
-            )
-        }
-        .toast(isPresenting: $showCopiedToast) {
-            AlertToast(
-                displayMode: .banner(.pop),
-                type: .systemImage("doc.on.doc", KeyStyle.solidSurfaceText(isDark: isDark)),
-                title: copyToastText,
-                style: .style(
-                    backgroundColor: KeyStyle.solidSurface(isDark: isDark),
-                    titleColor: KeyStyle.solidSurfaceText(isDark: isDark),
-                    titleFont: .custom("IBMPlexMono-Medium", size: 14)
-                )
-            )
-        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(uiColor: .systemBackground))
     }
 
-    // MARK: - Toolbar
-
-    @ViewBuilder
-    private func ToolbarView() -> some View {
-        HStack(spacing: 16) {
-            // Sort menu — icon only
-            Menu {
-                Picker("Sort by", selection: $sortOption) {
-                    ForEach(SortOption.allCases, id: \.self) { option in
-                        HStack {
-                            Text(option.rawValue)
-                            Spacer()
-                            Image(systemName: option.imageName)
-                        }
-                        .tag(option)
-                    }
-                }
-                Picker("Order", selection: $sortOrder) {
-                    switch sortOption {
-                    case .dateCreated:
-                        Label("Earliest First", systemImage: "arrow.up").tag(SortOrder.forward)
-                        Label("Latest First", systemImage: "arrow.down").tag(SortOrder.reverse)
-                    case .recentlyUsed:
-                        Label("Most Recent First", systemImage: "arrow.up").tag(SortOrder.reverse)
-                        Label("Least Recent First", systemImage: "arrow.down").tag(SortOrder.forward)
-                    case .alphabetical:
-                        Label("A to Z", systemImage: "arrow.up").tag(SortOrder.forward)
-                        Label("Z to A", systemImage: "arrow.down").tag(SortOrder.reverse)
-                    }
-                }
-            } label: {
-                Image(systemName: "arrow.up.arrow.down")
-                    .font(.system(size: 16, weight: .medium))
-                    .foregroundStyle(KeyStyle.secondaryGlyph(isDark: isDark))
-                    .frame(width: 44, height: 44)
-                    .contentShape(Rectangle())
-            }
-
-            // Tag filter menu
-            if !tags.isEmpty {
-                TagFilterMenu()
-            } else {
-                Text("Add tags for quick search")
-                    .font(.system(size: 10, weight: .regular))
-                    .foregroundStyle(KeyStyle.tertiaryGlyph(isDark: isDark))
-            }
-
-            // Clear filter
-            if selectedFilter != nil {
-                Button {
-                    selectedFilter = nil
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 14))
-                        .foregroundStyle(KeyStyle.tertiaryGlyph(isDark: isDark))
-                        .frame(width: 44, height: 44)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-            }
-
-            // Vault lock indicator — icon only, shown when secure snippets exist
-            if snippets.contains(where: { $0.isSecure }) {
-                Image(systemName: isUnlocked ? "lock.open" : "lock")
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(KeyStyle.secondaryGlyph(isDark: isDark))
-            }
-
-            Spacer()
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 0)
-    }
-
-    // MARK: - Create Snippet CTA
-
-    @ViewBuilder
-    private func CreateSnippetCTA() -> some View {
-        if showCreateSnippetCTA {
-            if keyboardActions.hasFullAccess() {
-                Button {
-                    createNewSnippetFromKeyboard(content: selectedText)
-                } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: "plus.circle.fill")
-                            .font(.system(size: 14, weight: .medium))
-                        Text("Save as snippet")
-                            .font(.custom("IBMPlexMono-Medium", size: 12))
-                    }
-                    .foregroundStyle(KeyStyle.glyph(isDark: isDark))
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 12)
-                    .background(
-                        RoundedRectangle(cornerRadius: KeyStyle.cornerRadius, style: .continuous)
-                            .fill(KeyStyle.keyBackground(isDark: isDark))
-                            .shadow(
-                                color: KeyStyle.keyShadow(isDark: isDark).color,
-                                radius: KeyStyle.keyShadow(isDark: isDark).radius,
-                                x: KeyStyle.keyShadow(isDark: isDark).x,
-                                y: KeyStyle.keyShadow(isDark: isDark).y
-                            )
-                    )
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(SnippetPressStyle())
-                .padding(.horizontal, 12)
-                .padding(.top, 4)
-                .padding(.bottom, 4)
-                .transition(.scale.combined(with: .opacity))
-                .animation(.easeInOut(duration: 0.2), value: showCreateSnippetCTA)
-            } else {
-                Text("Enable Full Access to create snippets from selected text.")
-                    .foregroundStyle(KeyStyle.tertiaryGlyph(isDark: isDark))
-                    .font(.system(size: 11))
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 4)
-            }
-        }
-    }
-
-    // MARK: - Empty State
-
-    @ViewBuilder
-    private func EmptyStateView() -> some View {
-        VStack(spacing: 8) {
-            if selectedFilter != nil {
-                // A filter is active but matches nothing.
-                Image(systemName: "line.3.horizontal.decrease.circle")
-                    .font(.system(size: 28, weight: .light))
-                    .foregroundStyle(KeyStyle.tertiaryGlyph(isDark: isDark))
-                HStack(spacing: 5) {
-                    if let colorHex = selectedFilter?.colorHex {
-                        TagColorIndicator(colorHex: colorHex, size: 6)
-                    }
-                    Text(selectedFilter?.name.map { "No snippets tagged #\($0)" } ?? "No snippets for this filter")
-                        .font(.custom("IBMPlexMono-Medium", size: 13))
-                        .foregroundStyle(KeyStyle.secondaryGlyph(isDark: isDark))
-                }
-                Button {
-                    selectedFilter = nil
-                } label: {
-                    Text("Clear filter")
-                        .font(.custom("IBMPlexMono-Medium", size: 12))
-                        .foregroundStyle(KeyStyle.glyph(isDark: isDark))
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 8)
-                        .background(
-                            RoundedRectangle(cornerRadius: KeyStyle.cornerRadius, style: .continuous)
-                                .fill(KeyStyle.keyBackground(isDark: isDark))
-                                .shadow(
-                                    color: KeyStyle.keyShadow(isDark: isDark).color,
-                                    radius: KeyStyle.keyShadow(isDark: isDark).radius,
-                                    x: KeyStyle.keyShadow(isDark: isDark).x,
-                                    y: KeyStyle.keyShadow(isDark: isDark).y
-                                )
-                        )
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(SnippetPressStyle())
-            } else {
-                // No snippets exist yet.
-                Image(systemName: "tray")
-                    .font(.system(size: 28, weight: .light))
-                    .foregroundStyle(KeyStyle.tertiaryGlyph(isDark: isDark))
-                Text("No snippets yet")
-                    .font(.custom("IBMPlexMono-Medium", size: 13))
-                    .foregroundStyle(KeyStyle.secondaryGlyph(isDark: isDark))
-                Text("Create snippets in the SnipKey app")
-                    .font(.custom("IBMPlexMono-Regular", size: 11))
-                    .foregroundStyle(KeyStyle.tertiaryGlyph(isDark: isDark))
-                    .multilineTextAlignment(.center)
-                Button {
-                    keyboardActions.openApp()
-                } label: {
-                    Text("Open SnipKey")
-                        .font(.custom("IBMPlexMono-Medium", size: 12))
-                        .foregroundStyle(KeyStyle.glyph(isDark: isDark))
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 8)
-                        .background(
-                            RoundedRectangle(cornerRadius: KeyStyle.cornerRadius, style: .continuous)
-                                .fill(KeyStyle.keyBackground(isDark: isDark))
-                                .shadow(
-                                    color: KeyStyle.keyShadow(isDark: isDark).color,
-                                    radius: KeyStyle.keyShadow(isDark: isDark).radius,
-                                    x: KeyStyle.keyShadow(isDark: isDark).x,
-                                    y: KeyStyle.keyShadow(isDark: isDark).y
-                                )
-                        )
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(SnippetPressStyle())
-                if keyboardActions.hasFullAccess() {
-                    Text("Select text and tap Save as snippet")
-                        .font(.custom("IBMPlexMono-Regular", size: 11))
-                        .foregroundStyle(KeyStyle.tertiaryGlyph(isDark: isDark))
-                        .multilineTextAlignment(.center)
-                }
-            }
-        }
-        .frame(maxWidth: .infinity, minHeight: 180)
-        .padding(.horizontal, 16)
-    }
-
-    // MARK: - Bottom Bar
-
-    @ViewBuilder
-    private func BottomBar() -> some View {
+    private var topBar: some View {
         HStack(spacing: 8) {
-            // Back to keyboard
-            if let qState = qwertyStateFromEnvironment {
-                Button {
-                    if currentKeyboardSettings.isQWERTYKeyboardEnabled {
-                        qState.showingSnippets = false
-                    } else {
-                        keyboardActions.advanceToNextInputMode()
-                    }
-                } label: {
-                    HStack() {
-                        Image(systemName: "keyboard")
-                            .font(.system(size: 12, weight: .medium))
-                            .frame(width: 44, height: 32)
-                            .contentShape(Rectangle())
-                        Text("Switch to keyboard")
-                            .underline()
-                            .font(.system(size: 12, weight: .medium))
-                    }
-                    .foregroundStyle(KeyStyle.secondaryGlyph(isDark: isDark))
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                    .background(
-                        RoundedRectangle(cornerRadius: KeyStyle.cornerRadius)
-                            .fill(KeyStyle.specialKeyBackground(isDark: isDark))
-                            .keyShadow(isDark: isDark)
-                    )
-                }
-                .buttonStyle(SnippetPressStyle())
-            } else {
-                // Legacy fallback: switch to next system keyboard
-                Button {
-                    NotificationCenter.default.post(
-                        name: NSNotification.Name(rawValue: "switchKey"), object: nil)
-                } label: {
-                    Image(systemName: "keyboard")
-                        .font(.system(size: 16, weight: .medium))
-                        .foregroundStyle(KeyStyle.secondaryGlyph(isDark: isDark))
-                        .frame(width: 44, height: 44)
-                        .contentShape(Rectangle())
-                }
-            }
-
-            Spacer()
-
-            // Action buttons
-            ActionButtons()
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
-    }
-
-    // MARK: - Tag Filter Menu
-
-    @ViewBuilder
-    private func TagFilterMenu() -> some View {
-        Menu {
-            ForEach(tags, id: \.id) { tag in
-                Button {
-                    selectedFilter = tag
-                } label: {
-                    Label {
-                        HStack {
-                            Text(tag.name ?? "")
-                            if tag == selectedFilter {
-                                Image(systemName: "checkmark")
-                            }
-                        }
-                    } icon: {
-                        HStack(spacing: 2) {
-                            if let colorHex = tag.colorHex, let color = Color.cached(hex: colorHex) {
-                                Image(systemName: "circle.fill")
-                                    .foregroundColor(color)
-                                    .font(.system(size: 8))
-                            }
-                            Image(systemName: tag.imageTag ?? "tag")
-                        }
-                    }
-                }
-            }
-        } label: {
-            HStack(spacing: 4) {
-                if let filter = selectedFilter, let colorHex = filter.colorHex {
-                    TagColorIndicator(colorHex: colorHex, size: 6)
-                }
-                Image(systemName: selectedFilter?.imageTag ?? "line.3.horizontal.decrease.circle")
-                    .font(.system(size: 13))
-                Text(selectedFilter?.name ?? "Filter")
-                    .font(.system(size: 12))
-            }
-            .foregroundStyle(selectedFilter != nil ? KeyStyle.glyph(isDark: isDark) : KeyStyle.secondaryGlyph(isDark: isDark))
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(
-                RoundedRectangle(cornerRadius: KeyStyle.cornerRadius)
-                    .fill(KeyStyle.specialKeyBackground(isDark: isDark))
-                    .keyShadow(isDark: isDark)
-            )
-        }
-    }
-
-    // MARK: - Action Buttons
-
-    @ViewBuilder
-    private func ActionButtons() -> some View {
-        HStack(spacing: 6) {
-            // Space
-            Button { spaceAction() } label: {
-                Image(systemName: "space")
-                    .resizable()
-                    .aspectRatio(contentMode: .fit)
-                    .frame(width: 24, height: 14)
-                    .foregroundStyle(KeyStyle.glyph(isDark: isDark))
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 10)
-                    .background(
-                        RoundedRectangle(cornerRadius: KeyStyle.cornerRadius)
-                            .fill(KeyStyle.specialKeyBackground(isDark: isDark))
-                            .keyShadow(isDark: isDark)
-                    )
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(SnippetPressStyle())
-
-            // Return
-            Button { returnAction() } label: {
-                Image(systemName: "return")
-                    .resizable()
-                    .aspectRatio(contentMode: .fit)
-                    .frame(width: 18, height: 14)
-                    .foregroundStyle(KeyStyle.glyph(isDark: isDark))
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 10)
-                    .background(
-                        RoundedRectangle(cornerRadius: KeyStyle.cornerRadius)
-                            .fill(KeyStyle.specialKeyBackground(isDark: isDark))
-                            .keyShadow(isDark: isDark)
-                    )
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(SnippetPressStyle())
-
-            // Delete (with long-press for rapid deletion)
             Button {
-                deleteCharacter(isLongPress: false)
+                favoritesOnly.toggle()
             } label: {
-                Image(systemName: "delete.left")
-                    .resizable()
-                    .aspectRatio(contentMode: .fit)
-                    .frame(width: 18, height: 14)
-                    .foregroundStyle(KeyStyle.glyph(isDark: isDark))
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 10)
-                    .background(
-                        RoundedRectangle(cornerRadius: KeyStyle.cornerRadius)
-                            .fill(KeyStyle.specialKeyBackground(isDark: isDark))
-                            .keyShadow(isDark: isDark)
-                    )
+                Label(
+                    favoritesOnly ? "Favorites" : "Recent",
+                    systemImage: favoritesOnly ? "star.fill" : "clock"
+                )
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(favoritesOnly ? .yellow : .primary)
+            }
+            .buttonStyle(.bordered)
+
+            Spacer(minLength: 4)
+
+            if let statusMessage {
+                Text(statusMessage)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .transition(.opacity)
+            }
+
+            Button {
+                saveCurrentClipboard()
+            } label: {
+                Label("Save Clipboard", systemImage: "doc.on.clipboard.fill")
+                    .font(.system(size: 13, weight: .semibold))
+            }
+            .buttonStyle(.borderedProminent)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 7)
+    }
+
+    private var emptyState: some View {
+        VStack(spacing: 8) {
+            Spacer(minLength: 8)
+
+            Image(systemName: favoritesOnly ? "star" : "clipboard")
+                .font(.system(size: 28, weight: .light))
+                .foregroundStyle(.secondary)
+
+            Text(favoritesOnly ? "No favorite snippets" : "No saved text yet")
+                .font(.system(size: 14, weight: .semibold))
+
+            Text(favoritesOnly
+                 ? "Tap the star beside a snippet to pin it here."
+                 : "Copy text, then tap Save Clipboard above.")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+
+            Spacer(minLength: 8)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(.horizontal, 20)
+    }
+
+    @ViewBuilder
+    private func snippetRow(_ snippet: SnippetItem) -> some View {
+        HStack(spacing: 8) {
+            Button {
+                insert(snippet)
+            } label: {
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 5) {
+                        Image(systemName: snippet.type == .url ? "link" : "text.alignleft")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.secondary)
+
+                        Text(snippet.title ?? suggestedTitle(for: snippet.content ?? ""))
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(.primary)
+                            .lineLimit(1)
+                    }
+
+                    Text(preview(for: snippet.content ?? ""))
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            Button {
+                toggleFavorite(snippet)
+            } label: {
+                Image(systemName: snippet.isFavorite ? "star.fill" : "star")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(snippet.isFavorite ? .yellow : .secondary)
+                    .frame(width: 36, height: 36)
                     .contentShape(Rectangle())
             }
-            .buttonStyle(SnippetPressStyle())
-            .simultaneousGesture(
-                LongPressGesture(minimumDuration: 0.5)
-                    .onEnded { _ in
-                        isLongPressing = true
-                        deleteCharacter(isLongPress: true)
-                        startRapidDeletion()
-                    }
-            )
-            .simultaneousGesture(
-                DragGesture(minimumDistance: 0)
-                    .onEnded { _ in
-                        if isLongPressing {
-                            isLongPressing = false
-                            stopRapidDeletion()
-                        }
-                    }
-            )
+            .buttonStyle(.plain)
+            .accessibilityLabel(snippet.isFavorite ? "Remove from Favorites" : "Add to Favorites")
         }
-    }
-
-    // MARK: - Snippet Actions
-
-    private func sentValue(snippet: SnippetItem) {
-        // Light tick on tap acknowledgment — covers both secure and plain paths
-        // (sentValueToKeyboard must NOT also fire, or the secure path double-buzzes).
-        KeyboardHaptics.keyPress()
-
-        snippetViewModel.trackSnippetUsage(snippet: snippet)
-
-        // Usage tracking mutates lastTimeUsed/usedCount in place; @Query won't
-        // re-emit for an attribute-only change, so reorder explicitly (springy
-        // for a natural "bump to top" when sorting by recently used).
-        if sortOption == .recentlyUsed {
-            recomputeDisplayed(animation: .spring(response: 0.35, dampingFraction: 0.85))
-        }
-
-        if snippet.isSecure {
-            sentSecureValue(snippet: snippet)
-        } else {
-            sentValueToKeyboard(snippet: snippet)
-        }
-    }
-
-    private func sentSecureValue(snippet: SnippetItem) {
-        // LAContext invokes the handlers on its own reply queue — hop to main
-        // before touching @State or the text proxy.
-        deviceBiometrics.authenticate(
-            successHandler: {
-                DispatchQueue.main.async {
-                    isUnlocked = true
-                    sentValueToKeyboard(snippet: snippet)
-                }
-            },
-            unSuccessHandler: { _ in
-                DispatchQueue.main.async {
-                    isUnlocked = false
-                }
-            }
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color(uiColor: .secondarySystemBackground))
         )
     }
 
-    /// Long-press entry point for the preview overlay. Secure snippets
-    /// authenticate BEFORE any content is exposed.
-    private func presentPreview(for snippet: SnippetItem) {
-        KeyboardHaptics.specialKey()
-        if snippet.isSecure {
-            deviceBiometrics.authenticate(
-                successHandler: {
-                    DispatchQueue.main.async {
-                        isUnlocked = true
-                        withAnimation(.easeOut(duration: 0.15)) { previewedSnippet = snippet }
-                    }
-                },
-                unSuccessHandler: { _ in
-                    DispatchQueue.main.async {
-                        isUnlocked = false
-                    }
-                }
-            )
+    private var editingBar: some View {
+        HStack(spacing: 6) {
+            controlButton(systemImage: "globe", accessibility: "Next Keyboard") {
+                advanceToNextInputMode()
+            }
+
+            controlButton(systemImage: "arrow.left", accessibility: "Move Cursor Left") {
+                moveCursor(-1)
+            }
+
+            controlButton(systemImage: "arrow.right", accessibility: "Move Cursor Right") {
+                moveCursor(1)
+            }
+
+            Button {
+                insertText(" ")
+            } label: {
+                Image(systemName: "space")
+                    .font(.system(size: 16, weight: .medium))
+                    .frame(maxWidth: .infinity, minHeight: 38)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.bordered)
+            .accessibilityLabel("Space")
+
+            controlButton(systemImage: "delete.left", accessibility: "Delete") {
+                deleteBackward()
+            }
+
+            controlButton(systemImage: "return", accessibility: "Return") {
+                insertReturn()
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 7)
+    }
+
+    private func controlButton(
+        systemImage: String,
+        accessibility: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.system(size: 16, weight: .medium))
+                .frame(width: 38, height: 38)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.bordered)
+        .accessibilityLabel(accessibility)
+    }
+
+    private func insert(_ snippet: SnippetItem) {
+        guard let content = snippet.content, !content.isEmpty else { return }
+
+        insertText(content)
+        snippet.lastTimeUsed = Date.now
+        snippet.usedCount += 1
+        try? modelContext.save()
+        showStatus("Inserted")
+    }
+
+    private func toggleFavorite(_ snippet: SnippetItem) {
+        snippet.isFavorite.toggle()
+        snippet.updatedDate = Date.now
+        try? modelContext.save()
+        showStatus(snippet.isFavorite ? "Added to Favorites" : "Removed from Favorites")
+    }
+
+    private func saveCurrentClipboard() {
+        guard let clipboardText = UIPasteboard.general.string else {
+            showStatus("Clipboard has no text")
+            return
+        }
+
+        let trimmed = clipboardText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            showStatus("Clipboard is empty")
+            return
+        }
+
+        if let existing = snippets.first(where: { $0.content == clipboardText }) {
+            existing.lastTimeUsed = Date.now
+            existing.updatedDate = Date.now
+            try? modelContext.save()
+            showStatus("Already saved")
+            return
+        }
+
+        let type: SnipType
+        if let url = URL(string: trimmed), let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" {
+            type = .url
         } else {
-            withAnimation(.easeOut(duration: 0.15)) { previewedSnippet = snippet }
+            type = .txt
         }
+
+        let item = SnippetItem(
+            title: suggestedTitle(for: clipboardText),
+            content: clipboardText,
+            type: type,
+            isSecure: false
+        )
+        item.lastTimeUsed = Date.now
+        modelContext.insert(item)
+        try? modelContext.save()
+        showStatus("Saved")
     }
 
-    /// Copy from the preview overlay. Secure content only ever reaches this
-    /// function post-auth (the overlay is only presentable after biometrics).
-    private func copySnippetToClipboard(_ snippet: SnippetItem) {
-        suppressNextTap = false
-        withAnimation(.easeIn(duration: 0.12)) { previewedSnippet = nil }
+    private func suggestedTitle(for text: String) -> String {
+        let firstUsefulLine = text
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first { !$0.isEmpty } ?? "Clipboard"
 
-        let type = snippet.type ?? .txt
-        switch type {
-        case .txt, .url:
-            presentCopyResult(
-                SnippetPasteboard.copyText(
-                    snippet.content ?? "", hasFullAccess: keyboardActions.hasFullAccess()),
-                type: type)
-        case .image, .file:
-            Task { @MainActor in
-                presentCopyResult(await keyboardActions.copySnippetFile(snippet), type: type)
+        let compact = firstUsefulLine.replacingOccurrences(of: "\t", with: " ")
+        if compact.count <= 32 { return compact }
+        return String(compact.prefix(32)) + "…"
+    }
+
+    private func preview(for text: String) -> String {
+        text
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\t", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func showStatus(_ message: String) {
+        withAnimation(.easeInOut(duration: 0.15)) {
+            statusMessage = message
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+            guard statusMessage == message else { return }
+            withAnimation(.easeInOut(duration: 0.15)) {
+                statusMessage = nil
             }
-        }
-    }
-
-    /// Single toast pipeline for every copy outcome — the message always reflects
-    /// what actually happened (the old "File copied" toast showed unconditionally,
-    /// even when the write silently failed without Full Access).
-    private func presentCopyResult(_ result: SnippetCopyResult, type: SnipType) {
-        switch result {
-        case .success:
-            switch type {
-            case .file:
-                copyToastText = "PDF copied — long-press the text field and tap Paste to attach it."
-            case .image:
-                copyToastText = "Image copied — long-press the text field and tap Paste."
-            case .txt, .url:
-                copyToastText = "Copied to clipboard"
-            }
-        case .noFullAccess:
-            copyToastText = "Enable Full Access in Settings to copy snippets."
-        case .missingData:
-            copyToastText = "File not available yet. Open SnipKey to finish syncing."
-        case .tooLarge:
-            copyToastText = "Files over \(SnippetPasteboard.maxFileSizeDescription) can't be copied from the keyboard."
-        case .unsupportedType:
-            copyToastText = "This file type can't be copied."
-        }
-        showCopiedToast = true
-    }
-
-    private func sentValueToKeyboard(snippet: SnippetItem) {
-        if snippet.type == .image || snippet.type == .file {
-            // Files can't be inserted through textDocumentProxy (text-only API) —
-            // copy to the pasteboard and tell the user the true outcome. File-capable
-            // apps (Messages, Mail, Notes…) attach the file on paste; others can't
-            // paste it, and the file simply stays on the clipboard.
-            let type = snippet.type ?? .file
-            Task { @MainActor in
-                presentCopyResult(await keyboardActions.copySnippetFile(snippet), type: type)
-            }
-        } else {
-            NotificationCenter.default.post(
-                name: NSNotification.Name(rawValue: "addKey"), object: snippet)
-            actionKeyboardAfterPaste(actionKey: currentKeyboardSettings.afterPasteAction)
-        }
-    }
-
-    private func actionKeyboardAfterPaste(actionKey: KeyboardAfterPasteAction) {
-        switch actionKey {
-        case .rtrn:
-            NotificationCenter.default.post(
-                name: NSNotification.Name(rawValue: "addKey"), object: String(UnicodeScalar(0x000D)!))
-            NotificationCenter.default.post(
-                name: NSNotification.Name(rawValue: "addKey"), object: String(UnicodeScalar(0x000D)!))
-        case .changeReturn:
-            NotificationCenter.default.post(
-                name: NSNotification.Name(rawValue: "addKey"), object: String(UnicodeScalar(0x000D)!))
-            NotificationCenter.default.post(
-                name: NSNotification.Name(rawValue: "addKey"), object: String(UnicodeScalar(0x000D)!))
-            NotificationCenter.default.post(
-                name: NSNotification.Name(rawValue: "switchKey"), object: nil)
-        case .change:
-            NotificationCenter.default.post(
-                name: NSNotification.Name(rawValue: "addKey"), object: String(UnicodeScalar(0x0020)!))
-            NotificationCenter.default.post(
-                name: NSNotification.Name(rawValue: "switchKey"), object: nil)
-        case .space:
-            NotificationCenter.default.post(
-                name: NSNotification.Name(rawValue: "addKey"), object: String(UnicodeScalar(0x0020)!))
-        case .nothing:
-            break
-        }
-    }
-
-    // MARK: - Keyboard Actions
-
-    private func deleteCharacter(isLongPress: Bool) {
-        NotificationCenter.default.post(
-            name: NSNotification.Name(rawValue: "deleteKey"), object: isLongPress)
-    }
-
-    private func spaceAction() {
-        NotificationCenter.default.post(
-            name: NSNotification.Name(rawValue: "addKey"), object: String(UnicodeScalar(0x0020)!))
-    }
-
-    private func returnAction() {
-        NotificationCenter.default.post(
-            name: NSNotification.Name(rawValue: "addKey"), object: String(UnicodeScalar(0x000D)!))
-    }
-
-    private func startRapidDeletion() {
-        deleteTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { _ in
-            deleteCharacter(isLongPress: true)
-        }
-    }
-
-    private func stopRapidDeletion() {
-        isLongPressing = false
-        deleteTimer?.invalidate()
-        deleteTimer = nil
-    }
-
-    // MARK: - Create Snippet
-
-    private func createNewSnippetFromKeyboard(content: String) {
-        let title = String(content.prefix(14))
-        snippetViewModel.createSnippet(title, content: content, type: .txt, isSecure: false)
-        showCreatedToast = true
-    }
-
-    // MARK: - Notification Observers
-
-    private func setupNotificationObservers() {
-        removeNotificationObservers()
-
-        let o1 = NotificationCenter.default.addObserver(
-            forName: NSNotification.Name(rawValue: "selectText"),
-            object: nil, queue: nil
-        ) { notification in
-            if let text = notification.object as? String, !text.isEmpty {
-                showCreateSnippetCTA = true
-                selectedText = text
-            }
-        }
-
-        let o2 = NotificationCenter.default.addObserver(
-            forName: NSNotification.Name(rawValue: "selectTextEmpty"),
-            object: nil, queue: nil
-        ) { _ in
-            showCreateSnippetCTA = false
-        }
-
-        notificationObservers = [o1, o2]
-    }
-
-    private func removeNotificationObservers() {
-        for observer in notificationObservers {
-            NotificationCenter.default.removeObserver(observer)
-        }
-        notificationObservers.removeAll()
-    }
-}
-
-// MARK: - Keyboard View Extension (Root Entry Point)
-
-struct KeyboardViewExt: View {
-    @State private var container: ModelContainer?
-    @State private var settingsViewModel: SettingsViewModel?
-
-    var qwertyState: QWERTYKeyboardState
-    var keyboardActions: KeyboardActions
-    var slashCommandState: SlashCommandState
-    var predictiveTextState: PredictiveTextState
-    var reminderSuggestionState: ReminderSuggestionState
-    var timerSuggestionState: TimerSuggestionState
-    var clipboardState: ClipboardState
-
-    var body: some View {
-        Group {
-            if let container = container, let settingsViewModel = settingsViewModel {
-                Group {
-                    if qwertyState.showingSnippets {
-                        KeyboardView()
-                    } else if KeyboardFeatureFlags.useNativeKeyboardV2 {
-                        // V2 (experimental) — single-root gesture, finger-slide, accents, space cursor.
-                        NativeKeyboardV2View_SwiftUI(adjustCaret: keyboardActions.adjustCaret)
-                    } else {
-                        // V1 — original per-key UIControl implementation.
-                        QWERTYKeyboardView()
-                    }
-                }
-                .modelContainer(container)
-                .environment(settingsViewModel)
-                .environment(qwertyState)
-                .environment(\.keyboardActions, keyboardActions)
-                .environment(\.slashCommandState, slashCommandState)
-                .environment(\.predictiveTextState, predictiveTextState)
-                .environment(\.reminderSuggestionState, reminderSuggestionState)
-                .environment(\.timerSuggestionState, timerSuggestionState)
-                .environment(\.clipboardState, clipboardState)
-            } else {
-                // Reserve the full keyboard rect so the system shows the keyboard
-                // frame instantly. No ProgressView — it would draw and animate,
-                // adding visible jitter while SwiftData is still opening.
-                Color.clear
-                    .frame(height: KeyboardDimensions.totalHeight(forScreenWidth: UIScreen.main.bounds.width))
-            }
-        }
-        .task {
-            await loadIfNeeded()
-        }
-    }
-
-    private func loadIfNeeded() async {
-        guard container == nil else { return }
-        let loaded = await ModelContainerProvider.shared.get()
-        let modelContext = loaded.mainContext
-        let viewModel = SettingsViewModel(modelContext: modelContext)
-
-        // Read the experimental QWERTY keyboard setting to determine initial view.
-        let isQWERTYEnabled = fetchQWERTYKeyboardSetting(from: modelContext)
-        qwertyState.showingSnippets = !isQWERTYEnabled
-
-        container = loaded
-        settingsViewModel = viewModel
-    }
-
-    private func fetchQWERTYKeyboardSetting(from context: ModelContext) -> Bool {
-        let descriptor = FetchDescriptor<SettingsModel>()
-        do {
-            let settings = try context.fetch(descriptor)
-            return settings.first?.isQWERTYKeyboardEnabled ?? false
-        } catch {
-            return false
         }
     }
 }
-
-// MARK: - Preview
 
 #Preview {
-    let tempSettingsContainer = SnipKeyDataManager().makeSharedContainer()
-    let settingsViewModel = SettingsViewModel(modelContext: tempSettingsContainer.mainContext)
-
-    return KeyboardViewExt(
-        qwertyState: QWERTYKeyboardState(),
-        keyboardActions: KeyboardActions.noop,
-        slashCommandState: SlashCommandState(),
-        predictiveTextState: PredictiveTextState(),
-        reminderSuggestionState: ReminderSuggestionState(),
-        timerSuggestionState: TimerSuggestionState(),
-        clipboardState: ClipboardState()
-    )
-    .onAppear {
-        settingsViewModel.modelContext = tempSettingsContainer.mainContext
-        settingsViewModel.setupKeyboardSettings()
-    }
-    .modelContainer(tempSettingsContainer)
-    .environment(settingsViewModel)
+    KeyboardView()
+        .frame(height: 340)
 }
