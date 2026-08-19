@@ -1300,7 +1300,7 @@
 			repositoryURL = "https://github.com/EmergeTools/Pow";
 			requirement = {
 				kind = upToNextMajorVersion;
-				minimumVersion = 1.0.3;
+				minimumVersion = 1.0.6;
 			};
 		};
 		066372152BEDC0AC00226EE4 /* XCRemoteSwiftPackageReference "CloudKitSyncMonitor" */ = {
