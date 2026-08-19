@@ -5,6 +5,7 @@
 //  Clipboard-first keyboard surface for the personal SnipKey fork.
 //
 
+import Foundation
 import SwiftData
 import SwiftUI
 import UIKit
@@ -79,7 +80,7 @@ struct KeyboardView: View {
                     systemImage: favoritesOnly ? "star.fill" : "clock"
                 )
                 .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(favoritesOnly ? .yellow : .primary)
+                .foregroundStyle(favoritesOnly ? Color.yellow : Color.primary)
             }
             .buttonStyle(.bordered)
 
@@ -165,7 +166,7 @@ struct KeyboardView: View {
             } label: {
                 Image(systemName: snippet.isFavorite ? "star.fill" : "star")
                     .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(snippet.isFavorite ? .yellow : .secondary)
+                    .foregroundStyle(snippet.isFavorite ? Color.yellow : Color.secondary)
                     .frame(width: 36, height: 36)
                     .contentShape(Rectangle())
             }
