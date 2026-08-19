@@ -153,7 +153,7 @@ final class SettingsModel {
 /// The keyboard extension needs synchronous reads at launch (SwiftData fetch is async).
 /// The main app's SettingsViewModel mirrors writes here every time the SwiftData settings change.
 enum AppGroupSettings {
-    static let suite = "group.snipkey"
+    static let suite = "group.com.tues8557.clipboardkeyboard"
 
     enum Key {
         static let useNativeKeyboardV2 = "useNativeKeyboardV2"
