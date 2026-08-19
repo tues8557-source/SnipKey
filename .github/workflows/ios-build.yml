@@ -4,9 +4,11 @@ on:
   push:
     branches:
       - dev/clipboard-keyboard
+      - dev/personal-team-test
   pull_request:
     branches:
       - main
+      - dev/clipboard-keyboard
 
 jobs:
   build:
