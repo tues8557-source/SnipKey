@@ -10,18 +10,34 @@ import SwiftData
 import SwiftUI
 import UIKit
 
+enum CursorMoveCommand {
+    case character(Int)
+    case word(Int)
+    case line(Int)
+}
+
+enum DeleteCommand {
+    case character(Int)
+    case word
+    case line
+}
+
 struct KeyboardView: View {
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \SnippetItem.creationDate, order: .reverse) private var snippets: [SnippetItem]
 
     var insertText: (String) -> Void = { _ in }
     var advanceToNextInputMode: () -> Void = {}
-    var deleteBackward: () -> Void = {}
-    var moveCursor: (Int) -> Void = { _ in }
+    var deleteBackward: (DeleteCommand) -> Void = { _ in }
+    var moveCursor: (CursorMoveCommand) -> Void = { _ in }
     var insertReturn: () -> Void = {}
 
     @State private var favoritesOnly = false
     @State private var statusMessage: String?
+    @State private var pendingDeleteSnippetID: String?
+    @State private var editingSnippet: SnippetItem?
+    @State private var editTitle = ""
+    @State private var editContent = ""
 
     private var visibleSnippets: [SnippetItem] {
         snippets
@@ -48,19 +64,23 @@ struct KeyboardView: View {
             topBar
             Divider()
 
-            if visibleSnippets.isEmpty {
-                emptyState
+            if editingSnippet != nil {
+                snippetEditor
             } else {
-                ScrollView {
-                    LazyVStack(spacing: 7) {
-                        ForEach(visibleSnippets, id: \.persistentModelID) { snippet in
-                            snippetRow(snippet)
+                if visibleSnippets.isEmpty {
+                    emptyState
+                } else {
+                    ScrollView {
+                        LazyVStack(spacing: 7) {
+                            ForEach(visibleSnippets, id: \.persistentModelID) { snippet in
+                                snippetRow(snippet)
+                            }
                         }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 8)
                     }
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 8)
+                    .scrollIndicators(.hidden)
                 }
-                .scrollIndicators(.hidden)
             }
 
             Divider()
@@ -94,13 +114,23 @@ struct KeyboardView: View {
                     .transition(.opacity)
             }
 
-            Button {
-                saveCurrentClipboard()
-            } label: {
-                Label("Save Clipboard", systemImage: "doc.on.clipboard.fill")
-                    .font(.system(size: 13, weight: .semibold))
+            if editingSnippet != nil {
+                Button {
+                    cancelEditing()
+                } label: {
+                    Label("Done", systemImage: "checkmark")
+                        .font(.system(size: 13, weight: .semibold))
+                }
+                .buttonStyle(.borderedProminent)
+            } else {
+                Button {
+                    saveCurrentClipboard()
+                } label: {
+                    Label("Save Clipboard", systemImage: "doc.on.clipboard.fill")
+                        .font(.system(size: 13, weight: .semibold))
+                }
+                .buttonStyle(.borderedProminent)
             }
-            .buttonStyle(.borderedProminent)
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 7)
@@ -172,6 +202,30 @@ struct KeyboardView: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel(snippet.isFavorite ? "Remove from Favorites" : "Add to Favorites")
+
+            Button {
+                beginEditing(snippet)
+            } label: {
+                Image(systemName: "pencil")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(Color.secondary)
+                    .frame(width: 34, height: 36)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Edit Snippet")
+
+            Button {
+                requestDelete(snippet)
+            } label: {
+                Image(systemName: pendingDeleteSnippetID == snippetIdentity(snippet) ? "trash.fill" : "trash")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(pendingDeleteSnippetID == snippetIdentity(snippet) ? Color.red : Color.secondary)
+                    .frame(width: 34, height: 36)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Delete Snippet")
         }
         .background(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
@@ -180,40 +234,127 @@ struct KeyboardView: View {
     }
 
     private var editingBar: some View {
-        HStack(spacing: 6) {
-            controlButton(systemImage: "globe", accessibility: "Next Keyboard") {
-                advanceToNextInputMode()
+        VStack(spacing: 6) {
+            HStack(spacing: 6) {
+                controlButton(systemImage: "globe", accessibility: "Next Keyboard") {
+                    advanceToNextInputMode()
+                }
+
+                repeatButton(systemImage: "arrow.uturn.backward", accessibility: "Move to Line Start") {
+                    moveCursor(.line(-1))
+                }
+
+                repeatButton(systemImage: "backward.end", accessibility: "Move Word Left") {
+                    moveCursor(.word(-1))
+                }
+
+                repeatButton(systemImage: "arrow.left", accessibility: "Move Cursor Left") {
+                    moveCursor(.character(-1))
+                }
+
+                repeatButton(systemImage: "arrow.right", accessibility: "Move Cursor Right") {
+                    moveCursor(.character(1))
+                }
+
+                repeatButton(systemImage: "forward.end", accessibility: "Move Word Right") {
+                    moveCursor(.word(1))
+                }
+
+                repeatButton(systemImage: "arrow.uturn.forward", accessibility: "Move to Line End") {
+                    moveCursor(.line(1))
+                }
             }
 
-            controlButton(systemImage: "arrow.left", accessibility: "Move Cursor Left") {
-                moveCursor(-1)
-            }
+            HStack(spacing: 6) {
+                repeatButton(systemImage: "delete.left", accessibility: "Delete") {
+                    deleteBackward(.character(1))
+                }
 
-            controlButton(systemImage: "arrow.right", accessibility: "Move Cursor Right") {
-                moveCursor(1)
-            }
+                Button {
+                    deleteBackward(.word)
+                } label: {
+                    Label("Word", systemImage: "delete.backward")
+                        .font(.system(size: 13, weight: .semibold))
+                        .frame(width: 78, height: 38)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.bordered)
+                .accessibilityLabel("Delete Word")
 
-            Button {
-                insertText(" ")
-            } label: {
-                Image(systemName: "space")
-                    .font(.system(size: 16, weight: .medium))
-                    .frame(maxWidth: .infinity, minHeight: 38)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.bordered)
-            .accessibilityLabel("Space")
+                Button {
+                    deleteBackward(.line)
+                } label: {
+                    Label("Line", systemImage: "text.badge.minus")
+                        .font(.system(size: 13, weight: .semibold))
+                        .frame(width: 78, height: 38)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.bordered)
+                .accessibilityLabel("Delete Line")
 
-            controlButton(systemImage: "delete.left", accessibility: "Delete") {
-                deleteBackward()
-            }
+                Button {
+                    insertText(" ")
+                } label: {
+                    Image(systemName: "space")
+                        .font(.system(size: 16, weight: .medium))
+                        .frame(maxWidth: .infinity, minHeight: 38)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.bordered)
+                .accessibilityLabel("Space")
 
-            controlButton(systemImage: "return", accessibility: "Return") {
-                insertReturn()
+                controlButton(systemImage: "return", accessibility: "Return") {
+                    insertReturn()
+                }
             }
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 7)
+    }
+
+    private var snippetEditor: some View {
+        VStack(spacing: 8) {
+            TextField("Title", text: $editTitle)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 13, weight: .semibold))
+
+            TextEditor(text: $editContent)
+                .font(.system(size: 13))
+                .scrollContentBackground(.hidden)
+                .background(Color(uiColor: .secondarySystemBackground))
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .frame(minHeight: 80)
+
+            HStack(spacing: 8) {
+                Button {
+                    loadClipboardIntoEditor()
+                } label: {
+                    Label("Paste", systemImage: "doc.on.clipboard")
+                        .font(.system(size: 13, weight: .semibold))
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+
+                Button(role: .destructive) {
+                    deleteEditingSnippet()
+                } label: {
+                    Label("Delete", systemImage: "trash")
+                        .font(.system(size: 13, weight: .semibold))
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+
+                Button {
+                    saveEditedSnippet()
+                } label: {
+                    Label("Save", systemImage: "checkmark")
+                        .font(.system(size: 13, weight: .semibold))
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding(8)
     }
 
     private func controlButton(
@@ -229,6 +370,18 @@ struct KeyboardView: View {
         }
         .buttonStyle(.bordered)
         .accessibilityLabel(accessibility)
+    }
+
+    private func repeatButton(
+        systemImage: String,
+        accessibility: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        RepeatingIconButton(
+            systemImage: systemImage,
+            accessibility: accessibility,
+            action: action
+        )
     }
 
     private func insert(_ snippet: SnippetItem) {
@@ -287,6 +440,87 @@ struct KeyboardView: View {
         showStatus("Saved")
     }
 
+    private func beginEditing(_ snippet: SnippetItem) {
+        editingSnippet = snippet
+        editTitle = snippet.title ?? suggestedTitle(for: snippet.content ?? "")
+        editContent = snippet.content ?? ""
+        pendingDeleteSnippetID = nil
+    }
+
+    private func cancelEditing() {
+        editingSnippet = nil
+        editTitle = ""
+        editContent = ""
+    }
+
+    private func saveEditedSnippet() {
+        guard let editingSnippet else { return }
+        let trimmedContent = editContent.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedContent.isEmpty else {
+            showStatus("Content is empty")
+            return
+        }
+
+        let trimmedTitle = editTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        editingSnippet.title = trimmedTitle.isEmpty ? suggestedTitle(for: trimmedContent) : trimmedTitle
+        editingSnippet.content = editContent
+        editingSnippet.type = detectedType(for: trimmedContent)
+        editingSnippet.updatedDate = Date.now
+        try? modelContext.save()
+        cancelEditing()
+        showStatus("Updated")
+    }
+
+    private func loadClipboardIntoEditor() {
+        guard let clipboardText = UIPasteboard.general.string,
+              !clipboardText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
+            showStatus("Clipboard has no text")
+            return
+        }
+
+        editContent = clipboardText
+        if editTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            editTitle = suggestedTitle(for: clipboardText)
+        }
+        showStatus("Loaded Clipboard")
+    }
+
+    private func deleteEditingSnippet() {
+        guard let editingSnippet else { return }
+        modelContext.delete(editingSnippet)
+        try? modelContext.save()
+        cancelEditing()
+        showStatus("Deleted")
+    }
+
+    private func requestDelete(_ snippet: SnippetItem) {
+        let identity = snippetIdentity(snippet)
+        guard pendingDeleteSnippetID == identity else {
+            pendingDeleteSnippetID = identity
+            showStatus("Tap trash again")
+            return
+        }
+
+        modelContext.delete(snippet)
+        try? modelContext.save()
+        pendingDeleteSnippetID = nil
+        showStatus("Deleted")
+    }
+
+    private func snippetIdentity(_ snippet: SnippetItem) -> String {
+        snippet.id ?? String(describing: snippet.persistentModelID)
+    }
+
+    private func detectedType(for text: String) -> SnipType {
+        if let url = URL(string: text),
+           let scheme = url.scheme?.lowercased(),
+           scheme == "http" || scheme == "https" {
+            return .url
+        }
+        return .txt
+    }
+
     private func suggestedTitle(for text: String) -> String {
         let firstUsefulLine = text
             .components(separatedBy: .newlines)
@@ -322,4 +556,46 @@ struct KeyboardView: View {
 #Preview {
     KeyboardView()
         .frame(height: 340)
+}
+
+private struct RepeatingIconButton: View {
+    let systemImage: String
+    let accessibility: String
+    let action: () -> Void
+
+    @State private var repeatTimer: Timer?
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.system(size: 16, weight: .medium))
+                .frame(width: 38, height: 38)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.bordered)
+        .accessibilityLabel(accessibility)
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { _ in
+                    startRepeating()
+                }
+                .onEnded { _ in
+                    stopRepeating()
+                }
+        )
+        .onDisappear(perform: stopRepeating)
+    }
+
+    private func startRepeating() {
+        guard repeatTimer == nil else { return }
+
+        repeatTimer = Timer.scheduledTimer(withTimeInterval: 0.09, repeats: true) { _ in
+            action()
+        }
+    }
+
+    private func stopRepeating() {
+        repeatTimer?.invalidate()
+        repeatTimer = nil
+    }
 }
