@@ -34,7 +34,6 @@ struct KeyboardView: View {
 
     @State private var favoritesOnly = false
     @State private var statusMessage: String?
-    @State private var pendingDeleteSnippetID: String?
     @State private var editingSnippet: SnippetItem?
     @State private var editTitle = ""
     @State private var editContent = ""
@@ -72,8 +71,8 @@ struct KeyboardView: View {
                 } else {
                     ScrollView {
                         LazyVStack(spacing: 7) {
-                            ForEach(visibleSnippets, id: \.persistentModelID) { snippet in
-                                snippetRow(snippet)
+                            ForEach(Array(visibleSnippets.enumerated()), id: \.element.persistentModelID) { index, snippet in
+                                snippetRow(snippet, number: index + 1)
                             }
                         }
                         .padding(.horizontal, 8)
@@ -161,75 +160,25 @@ struct KeyboardView: View {
     }
 
     @ViewBuilder
-    private func snippetRow(_ snippet: SnippetItem) -> some View {
-        HStack(spacing: 8) {
-            Button {
+    private func snippetRow(_ snippet: SnippetItem, number: Int) -> some View {
+        SwipeSnippetRow(
+            number: number,
+            title: snippet.title ?? suggestedTitle(for: snippet.content ?? ""),
+            preview: preview(for: snippet.content ?? ""),
+            typeImage: snippet.type == .url ? "link" : "text.alignleft",
+            isFavorite: snippet.isFavorite,
+            onInsert: {
                 insert(snippet)
-            } label: {
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 5) {
-                        Image(systemName: snippet.type == .url ? "link" : "text.alignleft")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(.secondary)
-
-                        Text(snippet.title ?? suggestedTitle(for: snippet.content ?? ""))
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(.primary)
-                            .lineLimit(1)
-                    }
-
-                    Text(preview(for: snippet.content ?? ""))
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                        .multilineTextAlignment(.leading)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 8)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-
-            Button {
+            },
+            onToggleFavorite: {
                 toggleFavorite(snippet)
-            } label: {
-                Image(systemName: snippet.isFavorite ? "star.fill" : "star")
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(snippet.isFavorite ? Color.yellow : Color.secondary)
-                    .frame(width: 36, height: 36)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel(snippet.isFavorite ? "Remove from Favorites" : "Add to Favorites")
-
-            Button {
+            },
+            onEdit: {
                 beginEditing(snippet)
-            } label: {
-                Image(systemName: "pencil")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(Color.secondary)
-                    .frame(width: 34, height: 36)
-                    .contentShape(Rectangle())
+            },
+            onDelete: {
+                deleteSnippet(snippet)
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Edit Snippet")
-
-            Button {
-                requestDelete(snippet)
-            } label: {
-                Image(systemName: pendingDeleteSnippetID == snippetIdentity(snippet) ? "trash.fill" : "trash")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(pendingDeleteSnippetID == snippetIdentity(snippet) ? Color.red : Color.secondary)
-                    .frame(width: 34, height: 36)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Delete Snippet")
-        }
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Color(uiColor: .secondarySystemBackground))
         )
     }
 
@@ -444,7 +393,6 @@ struct KeyboardView: View {
         editingSnippet = snippet
         editTitle = snippet.title ?? suggestedTitle(for: snippet.content ?? "")
         editContent = snippet.content ?? ""
-        pendingDeleteSnippetID = nil
     }
 
     private func cancelEditing() {
@@ -494,22 +442,10 @@ struct KeyboardView: View {
         showStatus("Deleted")
     }
 
-    private func requestDelete(_ snippet: SnippetItem) {
-        let identity = snippetIdentity(snippet)
-        guard pendingDeleteSnippetID == identity else {
-            pendingDeleteSnippetID = identity
-            showStatus("Tap trash again")
-            return
-        }
-
+    private func deleteSnippet(_ snippet: SnippetItem) {
         modelContext.delete(snippet)
         try? modelContext.save()
-        pendingDeleteSnippetID = nil
         showStatus("Deleted")
-    }
-
-    private func snippetIdentity(_ snippet: SnippetItem) -> String {
-        snippet.id ?? String(describing: snippet.persistentModelID)
     }
 
     private func detectedType(for text: String) -> SnipType {
@@ -597,5 +533,158 @@ private struct RepeatingIconButton: View {
     private func stopRepeating() {
         repeatTimer?.invalidate()
         repeatTimer = nil
+    }
+}
+
+private struct SwipeSnippetRow: View {
+    let number: Int
+    let title: String
+    let preview: String
+    let typeImage: String
+    let isFavorite: Bool
+    let onInsert: () -> Void
+    let onToggleFavorite: () -> Void
+    let onEdit: () -> Void
+    let onDelete: () -> Void
+
+    @State private var isActionsVisible = false
+    @State private var dragOffset: CGFloat = 0
+
+    private let actionWidth: CGFloat = 96
+
+    var body: some View {
+        ZStack(alignment: .trailing) {
+            actionButtons
+
+            rowContent
+                .offset(x: isActionsVisible ? -actionWidth + dragOffset : dragOffset)
+                .gesture(
+                    DragGesture(minimumDistance: 18, coordinateSpace: .local)
+                        .onChanged { value in
+                            let horizontal = value.translation.width
+                            let vertical = abs(value.translation.height)
+                            guard abs(horizontal) > vertical else { return }
+
+                            if isActionsVisible {
+                                dragOffset = max(-28, min(42, horizontal * 0.25))
+                            } else {
+                                dragOffset = max(-actionWidth, min(0, horizontal))
+                            }
+                        }
+                        .onEnded { value in
+                            let horizontal = value.translation.width
+                            let vertical = abs(value.translation.height)
+                            defer { dragOffset = 0 }
+                            guard abs(horizontal) > vertical else { return }
+
+                            if isActionsVisible {
+                                if horizontal < -40 {
+                                    onDelete()
+                                } else if horizontal > 35 {
+                                    withAnimation(.spring(response: 0.24, dampingFraction: 0.86)) {
+                                        isActionsVisible = false
+                                    }
+                                }
+                            } else if horizontal < -36 {
+                                withAnimation(.spring(response: 0.24, dampingFraction: 0.86)) {
+                                    isActionsVisible = true
+                                }
+                            }
+                        }
+                )
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+
+    private var rowContent: some View {
+        HStack(spacing: 8) {
+            Text("\(number)")
+                .font(.system(size: 12, weight: .bold, design: .rounded))
+                .foregroundStyle(.secondary)
+                .frame(width: 26, height: 36)
+                .background(Circle().fill(Color(uiColor: .tertiarySystemFill)))
+
+            Button {
+                if isActionsVisible {
+                    withAnimation(.spring(response: 0.24, dampingFraction: 0.86)) {
+                        isActionsVisible = false
+                    }
+                } else {
+                    onInsert()
+                }
+            } label: {
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 5) {
+                        Image(systemName: typeImage)
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.secondary)
+
+                        Text(title)
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(.primary)
+                            .lineLimit(1)
+                    }
+
+                    Text(preview)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 8)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            Button {
+                onToggleFavorite()
+            } label: {
+                Image(systemName: isFavorite ? "star.fill" : "star")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(isFavorite ? Color.yellow : Color.secondary)
+                    .frame(width: 36, height: 36)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(isFavorite ? "Remove from Favorites" : "Add to Favorites")
+        }
+        .padding(.horizontal, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color(uiColor: .secondarySystemBackground))
+        )
+    }
+
+    private var actionButtons: some View {
+        HStack(spacing: 0) {
+            Button {
+                withAnimation(.spring(response: 0.24, dampingFraction: 0.86)) {
+                    isActionsVisible = false
+                }
+                onEdit()
+            } label: {
+                Image(systemName: "pencil")
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundStyle(.white)
+                    .frame(width: 48, height: 56)
+            }
+            .buttonStyle(.plain)
+            .background(Color.blue)
+            .accessibilityLabel("Edit Snippet")
+
+            Button {
+                onDelete()
+            } label: {
+                Image(systemName: "trash")
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundStyle(.white)
+                    .frame(width: 48, height: 56)
+            }
+            .buttonStyle(.plain)
+            .background(Color.red)
+            .accessibilityLabel("Delete Snippet")
+        }
+        .frame(width: actionWidth)
     }
 }
