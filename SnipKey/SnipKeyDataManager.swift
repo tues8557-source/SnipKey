@@ -8,14 +8,11 @@
 import Foundation
 import SwiftData
 
-/// Shared SwiftData configuration used by both the containing app and the
-/// keyboard extension.
+/// SwiftData configuration used by both the containing app and the keyboard extension.
 ///
-/// Personal Team test builds deliberately use a local App Group store only.
-/// CloudKit is disabled on this branch so the project can be provisioned
-/// without the paid Apple Developer Program. The production/iCloud branch can
-/// switch `cloudKitDatabase` back to `.automatic` later without changing the
-/// model types or UI.
+/// Personal Team test builds do not include the App Groups capability, so each
+/// target falls back to its own local store. If the App Group is restored on a
+/// production branch, the same code automatically uses the shared store again.
 final class SnipKeyDataManager {
     static let appGroupIdentifier = "group.com.tues8557.clipboardkeyboard"
 
@@ -27,17 +24,12 @@ final class SnipKeyDataManager {
                 SnippetItem.self,
                 SettingsModel.self,
             ])
-            let modelConfiguration = ModelConfiguration(
-                schema: schema,
-                isStoredInMemoryOnly: false,
-                groupContainer: .identifier(Self.appGroupIdentifier),
-                cloudKitDatabase: .none
-            )
+            let modelConfiguration = Self.makeConfiguration(for: schema)
 
             do {
                 return try ModelContainer(for: schema, configurations: [modelConfiguration])
             } catch {
-                fatalError("Could not create local shared ModelContainer: \(error)")
+                fatalError("Could not create local ModelContainer: \(error)")
             }
         }()
 
@@ -54,13 +46,25 @@ final class SnipKeyDataManager {
                 SnippetItem.self,
                 SettingsModel.self,
             ])
-            let modelConfiguration = ModelConfiguration(
-                schema: schema,
-                isStoredInMemoryOnly: false,
-                groupContainer: .identifier(Self.appGroupIdentifier),
-                cloudKitDatabase: .none
-            )
+            let modelConfiguration = Self.makeConfiguration(for: schema)
             return try ModelContainer(for: schema, configurations: [modelConfiguration])
         }.value
+    }
+
+    private static func makeConfiguration(for schema: Schema) -> ModelConfiguration {
+        if FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupIdentifier) != nil {
+            return ModelConfiguration(
+                schema: schema,
+                isStoredInMemoryOnly: false,
+                groupContainer: .identifier(appGroupIdentifier),
+                cloudKitDatabase: .none
+            )
+        }
+
+        return ModelConfiguration(
+            schema: schema,
+            isStoredInMemoryOnly: false,
+            cloudKitDatabase: .none
+        )
     }
 }

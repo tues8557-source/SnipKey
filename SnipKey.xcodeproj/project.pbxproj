@@ -1185,7 +1185,6 @@
 				INFOPLIST_FILE = SnipKey/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = SnipKey;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
-				INFOPLIST_KEY_NSFaceIDUsageDescription = "We need to unlock your data";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchStoryboardName = "Launch Screen.storyboard";
@@ -1227,7 +1226,6 @@
 				INFOPLIST_FILE = SnipKey/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = SnipKey;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
-				INFOPLIST_KEY_NSFaceIDUsageDescription = "We need to unlock your data";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchStoryboardName = "Launch Screen.storyboard";
